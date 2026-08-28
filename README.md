@@ -19,6 +19,60 @@ npm run dev
 
 打开 `http://127.0.0.1:5173/`。
 
+## 换电脑使用
+
+新电脑需要先安装以下环境：
+
+- Git
+- Git LFS
+- Node.js 18 或更高版本
+- Python 3.11 或更高版本
+- PowerShell
+- FFmpeg（视频抽帧和时长读取需要）
+
+从 Gitee 下载项目：
+
+```powershell
+git clone https://gitee.com/Cc7130194/basketball-video-stats.git
+cd basketball-video-stats
+git lfs pull
+```
+
+安装前端依赖：
+
+```powershell
+npm install
+```
+
+启动本地后端服务：
+
+```powershell
+.\start-backend.ps1
+```
+
+第一次运行后端时，脚本会自动创建 `.venv` 虚拟环境并安装 Python 依赖。后端默认运行在 `http://127.0.0.1:8000`。
+
+保持后端终端运行，再打开一个新的 PowerShell 窗口，进入项目目录并启动前端：
+
+```powershell
+cd basketball-video-stats
+npm run dev
+```
+
+浏览器打开：
+
+```text
+http://127.0.0.1:5173/
+```
+
+如果项目目录不在当前终端所在位置，请将 `cd basketball-video-stats` 替换为实际项目路径，例如：
+
+```powershell
+cd D:\projects\basketball-video-stats
+```
+
+停止服务时，分别在前端和后端终端按 `Ctrl + C`。
+
 后端启动脚本会创建 `.venv` 并安装 `backend/requirements.txt`。服务默认运行在 `http://127.0.0.1:8000`。
 
 ## 已接入接口
