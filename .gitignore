@@ -1,0 +1,17 @@
+node_modules/
+dist/
+.venv/
+__pycache__/
+*.py[cod]
+*.log
+.env
+.DS_Store
+
+# Local database is kept in the private project directory, but not committed by default.
+data/*.sqlite3
+data/uploads/
+
+# Model weights and datasets should use Git LFS or a separate storage location.
+models/*.pt
+models/*.onnx
+datasets/
