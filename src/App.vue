@@ -468,7 +468,7 @@ function teamName(teamId?: string | null) {
   return workspace.value?.teams.find((team) => team.id === teamId)?.name || '未归属球队'
 }
 
-function playerDisplay(player?: Player) {
+function playerDisplay(player?: Partial<Player>) {
   return player?.displayName || player?.name || player?.code || '未归属球员'
 }
 
@@ -739,6 +739,7 @@ onBeforeUnmount(stopPolling)
     <div v-if="showPlayerEditor" class="modal-layer" @click.self="showPlayerEditor = false">
       <section class="modal player-modal">
         <div class="modal-header"><div><span class="panel-kicker">IDENTITY</span><h2>编辑球员身份</h2></div><button class="icon-button dark" type="button" title="关闭" @click="showPlayerEditor = false"><X :size="18" /></button></div>
+        <div class="editor-cover"><img v-if="playerDraft.coverUrl" :src="playerDraft.coverUrl" :alt="`${playerDisplay(playerDraft as Player)} 封面`" /><div v-else class="editor-cover-empty"><UsersRound :size="28" /><span>分析后自动生成球员封面</span></div><span>BEST FRAME</span></div>
         <div class="form-grid">
           <label><span>显示名称</span><input v-model="playerDraft.name" /></label><label><span>球衣号码</span><input v-model="playerDraft.number" /></label>
           <label><span>所属球队</span><select v-model="playerDraft.teamId"><option value="">未归属球队</option><option v-for="team in workspace?.teams" :key="team.id" :value="team.id">{{ team.name }}</option></select></label>
