@@ -3,3 +3,4 @@
 torch==2.7.1+cu118
 torchvision==0.22.1+cu118
 ultralytics==8.4.131
+supervision==0.27.0

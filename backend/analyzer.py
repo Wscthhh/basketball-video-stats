@@ -9,6 +9,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from .court_geometry import ShotClassification, classify_fiba_shot, projection_from_pose_result, transform_point
+
 SAMPLE_FPS = 5
 MAX_FRAMES = 50
 
@@ -20,11 +22,27 @@ class AnalysisResult:
     confidence: float
     description: str
     source: str
+    local_track_key: str | None = None
+    shot_type: str | None = None
+    shot_type_confidence: float = 0
+    shot_type_source: str | None = None
+    court_x: float | None = None
+    court_y: float | None = None
+    homography_confidence: float = 0
+    release_frame: int | None = None
+
+
+@dataclass
+class TrackCandidate:
+    local_track_key: str
+    confidence: float
+    detections: int
 
 
 @dataclass
 class InspectionResult:
     events: list[AnalysisResult] = field(default_factory=list)
+    tracks: list[TrackCandidate] = field(default_factory=list)
     metrics: dict[str, object] = field(default_factory=dict)
     error: str = ""
 
@@ -113,16 +131,27 @@ class BasketballAnalyzer:
             try:
                 player_results = self._predict(self.models["player"], frames, device, confidence=0.35)
                 ball_results = self._predict(self.models["ball"], frames, device, confidence=0.2)
-                court_results = self._predict(self.models["court"], [frames[len(frames) // 2]], device, confidence=0.25) if self.models["court"].ready else []
             except Exception as error:
                 return InspectionResult(error=f"inference failed: {error}")
 
             players, hoops = self._collect_detections(player_results, {"player"}, {"hoop"})
             balls, _ = self._collect_detections(ball_results, {"ball", "basketball", "sports ball"}, set(), best_per_frame=True)
-            court_keypoints = self._count_keypoints(court_results)
-            events = self._detect_shot_events(balls, hoops)
+            tracks, tracked_players = self._track_players(players)
+            events = self._detect_shot_events(balls, hoops, tracked_players)
+            court_keypoints = 0
+            if events and self.models["court"].ready:
+                release_frames = sorted({event.release_frame for event in events if event.release_frame is not None})
+                court_frames = [frames[min(max(frame, 0), len(frames) - 1)] for frame in release_frames]
+                try:
+                    court_results = self._predict(self.models["court"], court_frames, device, confidence=0.25)
+                    court_keypoints = self._count_keypoints(court_results)
+                    self._classify_shot_types(events, release_frames, court_results, tracked_players)
+                except Exception:
+                    # Shot detection remains valid when court calibration is unavailable.
+                    pass
             return InspectionResult(
                 events=events,
+                tracks=tracks,
                 metrics={
                     "sampledFrames": len(frames),
                     "playerDetections": len(players),
@@ -201,7 +230,7 @@ class BasketballAnalyzer:
                 primary.extend(frame_primary)
         return primary, secondary
 
-    def _detect_shot_events(self, balls: list[dict[str, float]], hoops: list[dict[str, float]]) -> list[AnalysisResult]:
+    def _detect_shot_events(self, balls: list[dict[str, float]], hoops: list[dict[str, float]], players: list[dict[str, float]]) -> list[AnalysisResult]:
         if len(balls) < 4:
             return []
         apex_index = min(range(len(balls)), key=lambda index: balls[index]["y"])
@@ -214,13 +243,18 @@ class BasketballAnalyzer:
             return []
 
         average_confidence = sum(ball["confidence"] for ball in balls) / len(balls)
+        release_ball = balls[max(0, apex_index - 2)]
+        release_frame = int(release_ball["frame"])
+        shooter = self._nearest_player(release_ball, players)
         events = [
             AnalysisResult(
                 "投篮",
-                apex["frame"] / SAMPLE_FPS,
+                release_frame / SAMPLE_FPS,
                 min(0.92, average_confidence),
                 "篮球轨迹呈现上升后下降，生成疑似投篮候选",
                 "ball-trajectory",
+                shooter,
+                release_frame=release_frame,
             )
         ]
 
@@ -242,10 +276,143 @@ class BasketballAnalyzer:
                             min(0.9, (ball["confidence"] + hoop["confidence"]) / 2),
                             "篮球由篮筐上方穿过篮筐区域，生成疑似命中候选",
                             "ball-hoop-crossing",
+                            shooter,
+                            release_frame=release_frame,
                         )
                     )
                     return events
         return events
+
+    def _classify_shot_types(self, events: list[AnalysisResult], release_frames: list[int], court_results: list[Any], players: list[dict[str, float]]) -> None:
+        projections = {frame: projection_from_pose_result(result) for frame, result in zip(release_frames, court_results)}
+        for event in events:
+            if event.release_frame is None or not event.local_track_key:
+                continue
+            projection = projections.get(event.release_frame)
+            if projection is None:
+                continue
+            candidates = [player for player in players if player.get("local_track_key") == event.local_track_key]
+            if not candidates:
+                continue
+            player = min(candidates, key=lambda item: abs(item["frame"] - event.release_frame))
+            foot = ((player["x1"] + player["x2"]) / 2, player["y2"])
+            court_point = transform_point(foot, projection)
+            if court_point is None:
+                continue
+            classification = classify_fiba_shot(court_point, projection.confidence)
+            if classification.shot_type == "freeThrow" and not self._is_stationary_release(event.local_track_key, event.release_frame, players):
+                classification = ShotClassification("twoPoint", classification.confidence * 0.75, court_point[0], court_point[1], "release point is near the free-throw line but the shooter is moving")
+            event.shot_type = classification.shot_type
+            event.shot_type_confidence = classification.confidence
+            event.shot_type_source = "fiba-geometry" if classification.shot_type else None
+            event.court_x = classification.court_x
+            event.court_y = classification.court_y
+            event.homography_confidence = projection.confidence
+            if classification.shot_type:
+                label = {"freeThrow": "罚球", "twoPoint": "两分", "threePoint": "三分"}[classification.shot_type]
+                event.description = f"{event.description}；FIBA 球场定位判断为{label}"
+
+    @staticmethod
+    def _is_stationary_release(track_key: str, release_frame: int, players: list[dict[str, float]]) -> bool:
+        window_start = max(0, release_frame - 3)
+        shooter = sorted(
+            [item for item in players if item.get("local_track_key") == track_key and window_start <= item["frame"] <= release_frame],
+            key=lambda item: item["frame"],
+        )
+        if len(shooter) < 2:
+            return False
+        first, last = shooter[0], shooter[-1]
+        first_frame_players = [item for item in players if item["frame"] == first["frame"]]
+        last_frame_players = [item for item in players if item["frame"] == last["frame"]]
+        if not first_frame_players or not last_frame_players:
+            return False
+        first_camera = (sum(item["x"] for item in first_frame_players) / len(first_frame_players), sum(item["y"] for item in first_frame_players) / len(first_frame_players))
+        last_camera = (sum(item["x"] for item in last_frame_players) / len(last_frame_players), sum(item["y"] for item in last_frame_players) / len(last_frame_players))
+        residual_x = (last["x"] - first["x"]) - (last_camera[0] - first_camera[0])
+        residual_y = (last["y"] - first["y"]) - (last_camera[1] - first_camera[1])
+        player_height = max(1.0, last["y2"] - last["y1"])
+        return (residual_x**2 + residual_y**2) ** 0.5 / player_height < 0.12
+
+    @staticmethod
+    def _iou(left: dict[str, float], right: dict[str, float]) -> float:
+        x1, y1 = max(left["x1"], right["x1"]), max(left["y1"], right["y1"])
+        x2, y2 = min(left["x2"], right["x2"]), min(left["y2"], right["y2"])
+        intersection = max(0, x2 - x1) * max(0, y2 - y1)
+        area_left = (left["x2"] - left["x1"]) * (left["y2"] - left["y1"])
+        area_right = (right["x2"] - right["x1"]) * (right["y2"] - right["y1"])
+        return intersection / max(area_left + area_right - intersection, 1e-6)
+
+    def _track_players(self, detections: list[dict[str, float]]) -> tuple[list[TrackCandidate], list[dict[str, float]]]:
+        try:
+            import numpy as np
+            import supervision as sv  # type: ignore
+
+            tracker = sv.ByteTrack(
+                track_activation_threshold=0.35,
+                lost_track_buffer=12,
+                minimum_matching_threshold=0.72,
+                frame_rate=SAMPLE_FPS,
+                minimum_consecutive_frames=2,
+            )
+            by_frame: dict[int, list[dict[str, float]]] = {}
+            for detection in detections:
+                by_frame.setdefault(int(detection["frame"]), []).append(detection)
+
+            tracked_players: list[dict[str, float]] = []
+            aggregates: dict[str, dict[str, float]] = {}
+            for frame_index in range(max(by_frame, default=-1) + 1):
+                frame_detections = by_frame.get(frame_index, [])
+                if frame_detections:
+                    boxes = np.asarray([[item["x1"], item["y1"], item["x2"], item["y2"]] for item in frame_detections], dtype=np.float32)
+                    confidence = np.asarray([item["confidence"] for item in frame_detections], dtype=np.float32)
+                    current = sv.Detections(xyxy=boxes, confidence=confidence, class_id=np.zeros(len(frame_detections), dtype=int))
+                else:
+                    current = sv.Detections.empty()
+                tracked = tracker.update_with_detections(current)
+                if tracked.tracker_id is None:
+                    continue
+                for box, confidence, tracker_id in zip(tracked.xyxy, tracked.confidence, tracked.tracker_id):
+                    key = f"local-{int(tracker_id):03d}"
+                    x1, y1, x2, y2 = (float(value) for value in box)
+                    item = {
+                        "frame": float(frame_index), "x": (x1 + x2) / 2, "y": (y1 + y2) / 2,
+                        "x1": x1, "y1": y1, "x2": x2, "y2": y2,
+                        "confidence": float(confidence), "local_track_key": key,
+                    }
+                    tracked_players.append(item)
+                    aggregate = aggregates.setdefault(key, {"count": 0, "confidence": 0})
+                    aggregate["count"] += 1
+                    aggregate["confidence"] += float(confidence)
+            tracks = [
+                TrackCandidate(key, value["confidence"] / value["count"], int(value["count"]))
+                for key, value in aggregates.items() if value["count"] >= 2
+            ]
+            valid_keys = {track.local_track_key for track in tracks}
+            return tracks, [item for item in tracked_players if item["local_track_key"] in valid_keys]
+        except ImportError:
+            return self._track_players_iou(detections)
+
+    def _track_players_iou(self, detections: list[dict[str, float]]) -> tuple[list[TrackCandidate], list[dict[str, float]]]:
+        tracks: list[dict[str, Any]] = []
+        for detection in sorted(detections, key=lambda item: (item["frame"], -item["confidence"])):
+            candidates = [track for track in tracks if detection["frame"] - track["frame"] <= 1 and self._iou(detection, track["last"]) >= 0.25]
+            track = max(candidates, key=lambda item: self._iou(detection, item["last"]), default=None)
+            if track is None:
+                track = {"key": f"local-{len(tracks)+1:03d}", "last": detection, "frame": detection["frame"], "count": 0, "confidence": 0.0}
+                tracks.append(track)
+            track["last"], track["frame"] = detection, detection["frame"]
+            track["count"] += 1; track["confidence"] += detection["confidence"]
+            detection["local_track_key"] = track["key"]
+        stable = [TrackCandidate(t["key"], t["confidence"] / max(t["count"], 1), t["count"]) for t in tracks if t["count"] >= 2]
+        valid_keys = {track.local_track_key for track in stable}
+        return stable, [item for item in detections if item.get("local_track_key") in valid_keys]
+
+    @staticmethod
+    def _nearest_player(ball: dict[str, float], players: list[dict[str, float]]) -> str | None:
+        nearby = [p for p in players if abs(p["frame"] - ball["frame"]) <= 1]
+        if not nearby: return None
+        player = min(nearby, key=lambda p: ((p["x"] - ball["x"]) ** 2 + (p["y"] - ball["y"]) ** 2) ** 0.5)
+        return player.get("local_track_key")
 
     @staticmethod
     def _count_keypoints(results: list[Any]) -> int:

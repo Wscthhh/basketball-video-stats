@@ -73,6 +73,16 @@ cd D:\projects\basketball-video-stats
 
 停止服务时，分别在前端和后端终端按 `Ctrl + C`。
 
+### 测试比赛数据
+
+需要体验完整的球员、统计、复核和集锦界面时，可在已有 `integration-test` 视频的电脑上执行：
+
+```powershell
+.\.venv\Scripts\python.exe .\scripts\seed-test-match.py
+```
+
+该脚本只向 SQLite 写入明确标记为“测试”的比赛数据，不会在前端代码中注入演示常量，也不会影响正式比赛。
+
 后端启动脚本会创建 `.venv` 并安装 `backend/requirements.txt`。服务默认运行在 `http://127.0.0.1:8000`。
 
 ## 已接入接口
@@ -123,3 +133,23 @@ $env:COURTTRACE_COURT_MODEL = 'D:\models\court_keypoint_detector.pt'
 ```
 
 当前适配器已经完成视频抽帧、多模型 GPU 推理、球员/篮球/篮筐类别提取、球场关键点统计和疑似投篮轨迹判断。球员跨片段身份、号码 OCR 和球队颜色聚类仍需继续接入；所有 AI 事件默认进入人工复核，不直接作为最终统计。
+
+## FIBA 投篮类型判断
+
+分析器使用现有球场模型的 18 个 FIBA 关键点，通过 RANSAC 单应性将出手球员脚点映射到 28×15 米标准球场：
+
+- 罚球：出手点位于罚球线附近，并通过短时相对运动检查
+- 两分：位于 6.75 米三分线内
+- 三分：位于三分弧线或底角直线外
+- 待判断：关键点不足、映射置信度不足，或脚点距离三分线小于 0.25 米
+
+自动结果保存 `shotTypeConfidence`、球场坐标和单应性置信度。人工修正的分类不会被重新分析覆盖。
+
+球员统计按已确认事件展示罚球、两分、三分的命中/出手以及总得分。
+
+### 算法参考
+
+- [abdullahtarek/basketball_analysis](https://github.com/abdullahtarek/basketball_analysis)：18 点 FIBA 球场映射、球员脚点和单应性思路；仓库未提供独立许可证文件，避免直接复制代码。
+- [josephattalla/Basketball-Shot-Detection](https://github.com/josephattalla/Basketball-Shot-Detection)：MIT License，多篮球/篮筐跟踪和篮筐穿越判断。
+- [DeepSportradar/camera-calibration-challenge](https://github.com/DeepSportradar/camera-calibration-challenge)：FIBA 摄像机标定数据和球场线分割基线，数据使用遵循挑战与数据集条款。
+- [metacore-stack/RimPlane](https://github.com/metacore-stack/RimPlane)：球场区域和三分线几何参考；许可证禁止商业衍生使用，本项目只参考公开几何思想，不复制其实现。
