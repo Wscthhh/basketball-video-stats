@@ -30,10 +30,10 @@ npm run dev
 - PowerShell
 - FFmpeg（视频抽帧和时长读取需要）
 
-从 Gitee 下载项目：
+从 GitHub 下载项目：
 
 ```powershell
-git clone https://gitee.com/Cc7130194/basketball-video-stats.git
+git clone https://github.com/Wscthhh/basketball-video-stats.git
 cd basketball-video-stats
 git lfs pull
 ```
