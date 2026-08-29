@@ -685,7 +685,7 @@ onBeforeUnmount(stopPolling)
             <div class="panel-header"><div><div class="panel-kicker">身份管理</div><h2>本场球员</h2></div></div>
             <div v-if="players.length" class="roster-columns">
               <button v-for="player in players" :key="player.id" class="roster-row" type="button" @click="editPlayer(player)">
-                <span class="roster-number" :style="{ background: player.color || '#87958b' }">{{ player.number || '?' }}</span>
+                <span class="roster-cover" :style="{ '--roster-color': player.color || '#87958b' }"><img v-if="player.coverUrl" :src="player.coverUrl" :alt="`${playerDisplay(player)} 封面`" /><span v-else>{{ player.number || '?' }}</span></span>
                 <span><strong>{{ playerDisplay(player) }}</strong><small>{{ teamName(player.teamId) }} · {{ player.numberSource === 'ai' ? `OCR ${Math.round((player.numberConfidence ?? 0) * 100)}%` : player.identityType === 'temporary' ? '临时身份' : '已确认身份' }} · {{ player.tracks ?? 0 }} 段轨迹</small></span>
                 <Settings2 :size="15" />
               </button>
@@ -751,6 +751,7 @@ onBeforeUnmount(stopPolling)
     <div v-if="showPlayerDetail && selectedPlayer" class="detail-layer" @click.self="showPlayerDetail = false">
       <aside class="player-detail-drawer">
         <div class="drawer-header"><div><span class="panel-kicker"><UsersRound :size="13" /> PLAYER PROFILE</span><h2>{{ playerDisplay(selectedPlayer) }}</h2><p>{{ teamName(selectedPlayer.teamId) }}</p></div><button class="icon-button dark" type="button" title="关闭" @click="showPlayerDetail = false"><X :size="18" /></button></div>
+        <div class="drawer-cover"><img v-if="selectedPlayer.coverUrl" :src="selectedPlayer.coverUrl" :alt="`${playerDisplay(selectedPlayer)} 封面`" /><div v-else class="drawer-cover-empty"><UsersRound :size="30" /><span>分析后自动生成球员封面</span></div><span class="drawer-cover-label">BEST FRAME</span></div>
         <div class="drawer-stat-grid"><div><strong>{{ selectedPlayer.number || '未设置' }}</strong><span>号码</span></div><div><strong>{{ highlights.length }}</strong><span>确认命中</span></div></div>
         <div class="drawer-section-heading"><h3>进球集锦</h3></div>
         <div v-if="highlights.length" class="highlight-list"><button v-for="event in highlights" :key="event.id" class="highlight-item" type="button" @click="selectHighlight(event)"><Play :size="15" /><span>{{ eventLabel(event.type) }} · {{ formatSeconds(event.seconds) }}</span><ChevronRight :size="15" /></button></div>

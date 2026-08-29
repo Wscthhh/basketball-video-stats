@@ -22,11 +22,14 @@ from .analyzer import BasketballAnalyzer, resolve_command
 ROOT = Path(__file__).resolve().parent.parent
 DATA_DIR = ROOT / "data"
 UPLOAD_DIR = DATA_DIR / "uploads"
+COVERS_DIR = DATA_DIR / "covers"
 DB_PATH = DATA_DIR / "courttrace.sqlite3"
 UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+COVERS_DIR.mkdir(parents=True, exist_ok=True)
 app = FastAPI(title="COURTTRACE Local Analysis API", version="0.2.0")
 app.add_middleware(CORSMiddleware, allow_origins=["http://127.0.0.1:5173", "http://localhost:5173"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
 app.mount("/media", StaticFiles(directory=UPLOAD_DIR), name="media")
+app.mount("/media-covers", StaticFiles(directory=COVERS_DIR), name="media-covers")
 ANALYZER = BasketballAnalyzer()
 
 
@@ -48,7 +51,7 @@ def init_db() -> None:
         CREATE TABLE IF NOT EXISTS analysis_events (id TEXT PRIMARY KEY, clip_id TEXT NOT NULL, event_type TEXT NOT NULL, seconds REAL NOT NULL, confidence REAL NOT NULL, status TEXT NOT NULL DEFAULT 'pending', player_id TEXT, description TEXT NOT NULL DEFAULT '', source TEXT NOT NULL DEFAULT '', confirmed_by TEXT, confirmation_rule TEXT, FOREIGN KEY(clip_id) REFERENCES clips(id));
         CREATE TABLE IF NOT EXISTS matches (id TEXT PRIMARY KEY, name TEXT NOT NULL, played_at TEXT, venue TEXT, status TEXT NOT NULL DEFAULT 'draft', is_test INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS teams (id TEXT PRIMARY KEY, match_id TEXT NOT NULL, side TEXT NOT NULL, name TEXT NOT NULL DEFAULT '', color TEXT, UNIQUE(match_id, side), FOREIGN KEY(match_id) REFERENCES matches(id));
-        CREATE TABLE IF NOT EXISTS players (id TEXT PRIMARY KEY, match_id TEXT NOT NULL, team_id TEXT, code TEXT NOT NULL, name TEXT NOT NULL DEFAULT '', number TEXT, number_confidence REAL NOT NULL DEFAULT 0, number_source TEXT, number_candidates_json TEXT NOT NULL DEFAULT '[]', identity_type TEXT NOT NULL DEFAULT 'temporary', status TEXT NOT NULL DEFAULT 'unconfirmed', confidence REAL NOT NULL DEFAULT 0, appearance_r REAL, appearance_g REAL, appearance_b REAL, appearance_samples INTEGER NOT NULL DEFAULT 0, track_count_total INTEGER NOT NULL DEFAULT 0, UNIQUE(match_id, code), FOREIGN KEY(match_id) REFERENCES matches(id));
+        CREATE TABLE IF NOT EXISTS players (id TEXT PRIMARY KEY, match_id TEXT NOT NULL, team_id TEXT, code TEXT NOT NULL, name TEXT NOT NULL DEFAULT '', number TEXT, number_confidence REAL NOT NULL DEFAULT 0, number_source TEXT, number_candidates_json TEXT NOT NULL DEFAULT '[]', identity_type TEXT NOT NULL DEFAULT 'temporary', status TEXT NOT NULL DEFAULT 'unconfirmed', confidence REAL NOT NULL DEFAULT 0, appearance_r REAL, appearance_g REAL, appearance_b REAL, appearance_samples INTEGER NOT NULL DEFAULT 0, track_count_total INTEGER NOT NULL DEFAULT 0, cover_path TEXT, cover_score REAL, cover_source_clip_id TEXT, cover_source_seconds REAL, UNIQUE(match_id, code), FOREIGN KEY(match_id) REFERENCES matches(id));
         CREATE TABLE IF NOT EXISTS player_tracks (id TEXT PRIMARY KEY, clip_id TEXT NOT NULL, player_id TEXT NOT NULL, local_track_key TEXT NOT NULL, team_id TEXT, confidence REAL NOT NULL DEFAULT 0, UNIQUE(clip_id, local_track_key), FOREIGN KEY(clip_id) REFERENCES clips(id), FOREIGN KEY(player_id) REFERENCES players(id));
         CREATE TABLE IF NOT EXISTS analysis_runs (id TEXT PRIMARY KEY, match_id TEXT NOT NULL, status TEXT NOT NULL, progress REAL NOT NULL DEFAULT 0, device TEXT NOT NULL, error TEXT NOT NULL DEFAULT '', started_at TEXT, finished_at TEXT, created_at TEXT NOT NULL, version TEXT NOT NULL DEFAULT '1', FOREIGN KEY(match_id) REFERENCES matches(id));
         CREATE TABLE IF NOT EXISTS event_revisions (id TEXT PRIMARY KEY, event_id TEXT NOT NULL, status TEXT NOT NULL, payload TEXT NOT NULL, created_at TEXT NOT NULL, FOREIGN KEY(event_id) REFERENCES analysis_events(id));
@@ -64,7 +67,7 @@ def init_db() -> None:
             if name not in {r["name"] for r in c.execute("PRAGMA table_info(analysis_events)")}:
                 c.execute(f"ALTER TABLE analysis_events ADD COLUMN {name} {definition}")
         player_columns = {r["name"] for r in c.execute("PRAGMA table_info(players)")}
-        for name, definition in {"appearance_r": "REAL", "appearance_g": "REAL", "appearance_b": "REAL", "appearance_samples": "INTEGER NOT NULL DEFAULT 0", "track_count_total": "INTEGER NOT NULL DEFAULT 0", "number_confidence": "REAL NOT NULL DEFAULT 0", "number_source": "TEXT", "number_candidates_json": "TEXT NOT NULL DEFAULT '[]'"}.items():
+        for name, definition in {"appearance_r": "REAL", "appearance_g": "REAL", "appearance_b": "REAL", "appearance_samples": "INTEGER NOT NULL DEFAULT 0", "track_count_total": "INTEGER NOT NULL DEFAULT 0", "number_confidence": "REAL NOT NULL DEFAULT 0", "number_source": "TEXT", "number_candidates_json": "TEXT NOT NULL DEFAULT '[]'", "cover_path": "TEXT", "cover_score": "REAL", "cover_source_clip_id": "TEXT", "cover_source_seconds": "REAL"}.items():
             if name not in player_columns:
                 c.execute(f"ALTER TABLE players ADD COLUMN {name} {definition}")
         c.execute("UPDATE players SET number_source='manual',number_confidence=1 WHERE number IS NOT NULL AND number_source IS NULL")
@@ -123,6 +126,7 @@ def player_payload(c: sqlite3.Connection, row: sqlite3.Row) -> dict[str, Any]:
     value["color"] = team["color"] if team else None
     value["tracksCount"] = c.execute("SELECT COUNT(*) FROM player_tracks WHERE player_id=?", (row["id"],)).fetchone()[0]
     value["tracks"] = value["tracksCount"]
+    value["coverUrl"] = f"/media-covers/{row['match_id']}/{row['id']}.jpg" if row["cover_path"] else None
     return value
 
 
@@ -415,12 +419,14 @@ async def merge_players(match_id: str, payload: dict[str, Any]) -> dict[str, Any
     if not source_id or not target_id or source_id == target_id: raise HTTPException(422, "sourceId and targetId are required")
     with db() as c:
         require_match(match_id, c)
-        source = c.execute("SELECT id FROM players WHERE id=? AND match_id=?", (source_id, match_id)).fetchone()
+        source = c.execute("SELECT id,identity_type,cover_path FROM players WHERE id=? AND match_id=?", (source_id, match_id)).fetchone()
         target = c.execute("SELECT id FROM players WHERE id=? AND match_id=?", (target_id, match_id)).fetchone()
         if not source or not target: raise HTTPException(404, "player not found")
         c.execute("UPDATE analysis_events SET player_id=?,updated_at=? WHERE player_id=?", (target_id, now(), source_id))
         c.execute("UPDATE player_tracks SET player_id=? WHERE player_id=?", (target_id, source_id))
         c.execute("DELETE FROM players WHERE id=?", (source_id,))
+        if source and source["identity_type"] in ("temporary", "unconfirmed"):
+            delete_cover_file(source["cover_path"])
         return player_payload(c, c.execute("SELECT * FROM players WHERE id=?", (target_id,)).fetchone())
 
 
@@ -531,6 +537,16 @@ def sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
+def delete_cover_file(path: str | None) -> None:
+    if not path:
+        return
+    candidate = Path(path)
+    try:
+        candidate.unlink(missing_ok=True)
+    except OSError:
+        pass
+
+
 def color_distance(rgb: tuple[float, float, float] | None, hex_color: str | None) -> float:
     if rgb is None or not hex_color or not hex_color.startswith("#") or len(hex_color) != 7:
         return 999.0
@@ -596,10 +612,12 @@ def cleanup_match_analysis(match_id: str) -> dict[str, int]:
             c.execute(f"DELETE FROM analysis_events WHERE id IN ({marks})", removable)
         track_rows = c.execute("SELECT pt.id FROM player_tracks pt JOIN clips cl ON cl.id=pt.clip_id WHERE cl.match_id=? AND cl.status IS NOT NULL", (match_id,)).fetchall()
         c.execute("DELETE FROM player_tracks WHERE clip_id IN (SELECT id FROM clips WHERE match_id=?)", (match_id,))
-        player_rows = c.execute("SELECT id FROM players WHERE match_id=? AND identity_type IN ('temporary','unconfirmed')", (match_id,)).fetchall()
+        player_rows = c.execute("SELECT id,cover_path FROM players WHERE match_id=? AND identity_type IN ('temporary','unconfirmed')", (match_id,)).fetchall()
         if player_rows:
             marks = ",".join("?" for _ in player_rows)
             c.execute(f"DELETE FROM players WHERE id IN ({marks})", [row["id"] for row in player_rows])
+            for row in player_rows:
+                delete_cover_file(row["cover_path"])
         runs = c.execute("SELECT COUNT(*) FROM analysis_runs WHERE match_id=?", (match_id,)).fetchone()[0]
         c.execute("DELETE FROM analysis_runs WHERE match_id=?", (match_id,))
         c.execute("UPDATE clips SET status='queued',confidence=0 WHERE match_id=?", (match_id,))
@@ -620,12 +638,18 @@ async def run_analysis(run_id: str, match_id: str, clip_ids: list[str], device: 
         for index, clip_id in enumerate(clip_ids, 1):
             with db() as c: clip = c.execute("SELECT * FROM clips WHERE id=? AND match_id=?", (clip_id, match_id)).fetchone()
             if not clip: continue
-            inspection = await asyncio.to_thread(ANALYZER.inspect, Path(clip["stored_path"]), device)
+            analysis_dir = DATA_DIR / "analysis" / run_id / clip_id
+            analysis_dir.mkdir(parents=True, exist_ok=True)
+            try:
+                inspection = await asyncio.to_thread(ANALYZER.inspect, Path(clip["stored_path"]), device, analysis_dir)
+            except TypeError:
+                inspection = await asyncio.to_thread(ANALYZER.inspect, Path(clip["stored_path"]), device)
             if inspection.error:
                 errors[clip_id] = inspection.error
                 with db() as c:
                     c.execute("UPDATE clips SET status='failed' WHERE id=?", (clip_id,))
                     c.execute("UPDATE analysis_runs SET progress=?,completed_clips=?,details_json=? WHERE id=?", (round(index / max(len(clip_ids), 1) * 100, 1), index, json.dumps({"errors": errors}), run_id))
+                shutil.rmtree(analysis_dir, ignore_errors=True)
                 continue
             with db() as c:
                 c.execute("UPDATE clips SET status='review',confidence=? WHERE id=?", (max((e.confidence for e in inspection.events), default=0), clip_id))
@@ -651,6 +675,11 @@ async def run_analysis(run_id: str, match_id: str, clip_ids: list[str], device: 
                     else:
                         c.execute("UPDATE players SET confidence=MAX(confidence,?),track_count_total=track_count_total+?,team_id=COALESCE(team_id,?) WHERE id=?", (track.confidence, track.detections, team_id, player_id))
                     old = c.execute("SELECT * FROM players WHERE id=?", (player_id,)).fetchone()
+                    if track.cover_image_path and track.cover_score > (old["cover_score"] or 0):
+                        persistent_path = COVERS_DIR / match_id / f"{player_id}.jpg"
+                        persistent_path.parent.mkdir(parents=True, exist_ok=True)
+                        shutil.copy2(track.cover_image_path, persistent_path)
+                        c.execute("UPDATE players SET cover_path=?,cover_score=?,cover_source_clip_id=?,cover_source_seconds=? WHERE id=?", (str(persistent_path), track.cover_score, clip_id, (track.cover_frame_index or 0) / 5, player_id))
                     if old["number_source"] != "manual" and track.number_candidates:
                         if track.number:
                             c.execute("UPDATE players SET number=?,number_confidence=?,number_source='ai',number_candidates_json=? WHERE id=?", (track.number, track.number_confidence, json.dumps(track.number_candidates), player_id))
@@ -696,6 +725,7 @@ async def run_analysis(run_id: str, match_id: str, clip_ids: list[str], device: 
                     else:
                         c.execute("INSERT INTO analysis_events(id,clip_id,event_type,seconds,confidence,status,description,source,run_id,fingerprint,local_track_key,player_id,team_id,shot_type,shot_type_confidence,shot_type_source,court_x,court_y,homography_confidence,release_frame,updated_at,points,confirmed_at,confirmed_by,confirmation_rule,highlight_start,highlight_end) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", (f"ai-{uuid.uuid4().hex}",clip_id,event_type,candidate.seconds,candidate.confidence,confirmation["status"],candidate.description,candidate.source,run_id,fingerprint,candidate.local_track_key,player_id,inferred_team_id,candidate.shot_type,candidate.shot_type_confidence,candidate.shot_type_source,candidate.court_x,candidate.court_y,candidate.homography_confidence,candidate.release_frame,now(),confirmation["points"],confirmation["confirmed_at"],confirmation["confirmed_by"],confirmation["confirmation_rule"],confirmation["highlight_start"],confirmation["highlight_end"]))
                 c.execute("UPDATE analysis_runs SET progress=?,completed_clips=? WHERE id=?", (round(index / max(len(clip_ids), 1) * 100, 1), index, run_id))
+            shutil.rmtree(analysis_dir, ignore_errors=True)
         with db() as c:
             c.execute("UPDATE analysis_runs SET status=?,progress=100,error=?,details_json=?,finished_at=? WHERE id=?", ("failed" if errors else "completed", "; ".join(errors.values()), json.dumps({"errors": errors}), now(), run_id))
     except Exception as error:

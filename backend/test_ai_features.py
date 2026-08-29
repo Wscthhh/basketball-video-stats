@@ -115,11 +115,45 @@ class MigrationTest(unittest.TestCase):
                 with main.db() as migrated:
                     player_columns = {row["name"] for row in migrated.execute("PRAGMA table_info(players)")}
                     event_columns = {row["name"] for row in migrated.execute("PRAGMA table_info(analysis_events)")}
-                self.assertTrue({"number_confidence", "number_source", "number_candidates_json"} <= player_columns)
+                self.assertTrue({"number_confidence", "number_source", "number_candidates_json", "cover_path", "cover_score", "cover_source_clip_id", "cover_source_seconds"} <= player_columns)
                 self.assertTrue({"confirmed_by", "confirmation_rule"} <= event_columns)
                 with main.db() as migrated:
                     player = migrated.execute("SELECT number_source,number_confidence FROM players WHERE id='old-player'").fetchone()
                 self.assertEqual((player["number_source"], player["number_confidence"]), ("manual", 1))
+            finally:
+                main.DB_PATH = old_path
+
+
+class CoverTest(unittest.TestCase):
+    def test_sharp_synthetic_frame_scores_higher_than_blurred_frame(self) -> None:
+        cv2 = __import__("cv2")
+        import numpy as np
+
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as directory:
+            sharp = np.zeros((240, 160, 3), dtype=np.uint8)
+            cv2.rectangle(sharp, (35, 30), (125, 210), (255, 255, 255), 2)
+            cv2.line(sharp, (35, 100), (125, 100), (255, 255, 255), 2)
+            sharp_path = Path(directory) / "sharp.jpg"
+            blurred_path = Path(directory) / "blurred.jpg"
+            cv2.imwrite(str(sharp_path), sharp)
+            cv2.imwrite(str(blurred_path), cv2.GaussianBlur(sharp, (21, 21), 0))
+            detection = {"x1": 35, "y1": 30, "x2": 125, "y2": 210}
+            self.assertGreater(BasketballAnalyzer.cover_score(sharp_path, detection), BasketballAnalyzer.cover_score(blurred_path, detection))
+
+    def test_player_payload_exposes_cover_url_only_when_path_exists(self) -> None:
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as directory:
+            old_path = main.DB_PATH
+            main.DB_PATH = Path(directory) / "cover.sqlite3"
+            try:
+                main.init_db()
+                with main.db() as connection:
+                    connection.execute("INSERT INTO matches VALUES(?,?,?,?,?,?,?)", ("match", "Match", None, None, "active", 0, main.now()))
+                    connection.execute("INSERT INTO players(id,match_id,code,cover_path) VALUES(?,?,?,?)", ("p1", "match", "p1", "covers/match/p1.jpg"))
+                    connection.execute("INSERT INTO players(id,match_id,code) VALUES(?,?,?)", ("p2", "match", "p2"))
+                    rows = connection.execute("SELECT * FROM players WHERE match_id=? ORDER BY id", ("match",)).fetchall()
+                    payloads = [main.player_payload(connection, row) for row in rows]
+                self.assertEqual(payloads[0]["coverUrl"], "/media-covers/match/p1.jpg")
+                self.assertIsNone(payloads[1]["coverUrl"])
             finally:
                 main.DB_PATH = old_path
 

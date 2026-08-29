@@ -44,6 +44,9 @@ class TrackCandidate:
     number: str | None = None
     number_confidence: float = 0
     number_candidates: list[dict[str, Any]] = field(default_factory=list)
+    cover_frame_index: int | None = None
+    cover_image_path: Path | None = None
+    cover_score: float = 0
 
 
 @dataclass
@@ -130,12 +133,16 @@ class BasketballAnalyzer:
             "ocr": {"ready": self._ocr is not None, "attempted": self._ocr_attempted, "error": self._ocr_error},
         }
 
-    def inspect(self, video_path: Path, device: str = "cpu") -> InspectionResult:
+    def inspect(self, video_path: Path, device: str = "cpu", output_dir: Path | None = None) -> InspectionResult:
         if not self.ready:
             return InspectionResult(error="player and ball models are required")
 
-        with self._lock, tempfile.TemporaryDirectory(prefix="courttrace-") as frame_dir:
-            frames, error = self._extract_frames(video_path, Path(frame_dir))
+        temporary_dir = tempfile.TemporaryDirectory(prefix="courttrace-") if output_dir is None else None
+        frame_dir = Path(output_dir) if output_dir is not None else Path(temporary_dir.name)
+        frame_dir.mkdir(parents=True, exist_ok=True)
+        try:
+          with self._lock:
+            frames, error = self._extract_frames(video_path, frame_dir)
             if error:
                 return InspectionResult(error=error)
 
@@ -147,7 +154,7 @@ class BasketballAnalyzer:
 
             players, hoops = self._collect_detections(player_results, {"player"}, {"hoop"})
             balls, _ = self._collect_detections(ball_results, {"ball", "basketball", "sports ball"}, set(), best_per_frame=True)
-            tracks, tracked_players = self._track_players(players, frames)
+            tracks, tracked_players = self._track_players(players, frames, frame_dir)
             self._recognize_track_numbers(tracks, tracked_players, frames)
             events = self._detect_shot_events(balls, hoops, tracked_players)
             court_keypoints = 0
@@ -174,6 +181,9 @@ class BasketballAnalyzer:
                     "modelMode": self.mode,
                 },
             )
+        finally:
+            if temporary_dir is not None:
+                temporary_dir.cleanup()
 
     def _extract_frames(self, video_path: Path, output: Path) -> tuple[list[Path], str]:
         ffmpeg = resolve_command("ffmpeg")
@@ -356,7 +366,7 @@ class BasketballAnalyzer:
         area_right = (right["x2"] - right["x1"]) * (right["y2"] - right["y1"])
         return intersection / max(area_left + area_right - intersection, 1e-6)
 
-    def _track_players(self, detections: list[dict[str, float]], frames: list[Path]) -> tuple[list[TrackCandidate], list[dict[str, float]]]:
+    def _track_players(self, detections: list[dict[str, float]], frames: list[Path], output_dir: Path | None = None) -> tuple[list[TrackCandidate], list[dict[str, float]]]:
         try:
             import numpy as np
             import supervision as sv  # type: ignore
@@ -398,6 +408,7 @@ class BasketballAnalyzer:
                     aggregate = aggregates.setdefault(key, {"count": 0, "confidence": 0})
                     aggregate["count"] += 1
                     aggregate["confidence"] += float(confidence)
+                    aggregate.setdefault("detections", []).append(item)
                     aggregate.setdefault("heights", []).append(max(1.0, y2 - y1))
                     aggregate.setdefault("aspects", []).append(max(0.01, (x2 - x1) / max(1.0, y2 - y1)))
                     color = self._sample_jersey_color(frames[frame_index], item)
@@ -408,16 +419,15 @@ class BasketballAnalyzer:
                         current_color[2] += color[2]
                         current_color[3] += 1
             tracks = [
-                TrackCandidate(key, value["confidence"] / value["count"], int(value["count"]), self._average_color(colors.get(key)),
-                               sum(value["aspects"]) / len(value["aspects"]), self._median(value["heights"]))
+                self._build_track_candidate(key, value, colors.get(key), frames, output_dir)
                 for key, value in aggregates.items() if value["count"] >= 3
             ]
             valid_keys = {track.local_track_key for track in tracks}
             return tracks, [item for item in tracked_players if item["local_track_key"] in valid_keys]
         except ImportError:
-            return self._track_players_iou(detections)
+            return self._track_players_iou(detections, frames, output_dir)
 
-    def _track_players_iou(self, detections: list[dict[str, float]]) -> tuple[list[TrackCandidate], list[dict[str, float]]]:
+    def _track_players_iou(self, detections: list[dict[str, float]], frames: list[Path] | None = None, output_dir: Path | None = None) -> tuple[list[TrackCandidate], list[dict[str, float]]]:
         tracks: list[dict[str, Any]] = []
         for detection in sorted(detections, key=lambda item: (item["frame"], -item["confidence"])):
             candidates = [track for track in tracks if detection["frame"] - track["frame"] <= 1 and self._iou(detection, track["last"]) >= 0.25]
@@ -428,9 +438,45 @@ class BasketballAnalyzer:
             track["last"], track["frame"] = detection, detection["frame"]
             track["count"] += 1; track["confidence"] += detection["confidence"]
             detection["local_track_key"] = track["key"]
-        stable = [TrackCandidate(t["key"], t["confidence"] / max(t["count"], 1), t["count"]) for t in tracks if t["count"] >= 3]
+        stable = []
+        for track in tracks:
+            if track["count"] < 3:
+                continue
+            candidate = TrackCandidate(track["key"], track["confidence"] / track["count"], track["count"])
+            if frames:
+                self._set_best_cover(candidate, [item for item in detections if item.get("local_track_key") == track["key"]], frames, output_dir)
+            stable.append(candidate)
         valid_keys = {track.local_track_key for track in stable}
         return stable, [item for item in detections if item.get("local_track_key") in valid_keys]
+
+    def _build_track_candidate(self, key: str, aggregate: dict[str, Any], color: list[float] | None, frames: list[Path], output_dir: Path | None) -> TrackCandidate:
+        candidate = TrackCandidate(key, aggregate["confidence"] / aggregate["count"], int(aggregate["count"]), self._average_color(color),
+                                    sum(aggregate["aspects"]) / len(aggregate["aspects"]), self._median(aggregate["heights"]))
+        trajectory = [item for item in aggregate.get("detections", [])]
+        self._set_best_cover(candidate, trajectory, frames, output_dir)
+        return candidate
+
+    def _set_best_cover(self, candidate: TrackCandidate, detections: list[dict[str, float]], frames: list[Path], output_dir: Path | None) -> None:
+        best: tuple[float, int, Any] | None = None
+        for detection in detections:
+            frame_index = int(detection["frame"])
+            if frame_index >= len(frames):
+                continue
+            crop, score = self._cover_crop_and_score(frames[frame_index], detection)
+            if crop is not None and (best is None or score > best[0]):
+                best = (score, frame_index, crop)
+        if best is None:
+            return
+        candidate.cover_score, candidate.cover_frame_index = best[0], best[1]
+        if output_dir is not None:
+            try:
+                import cv2
+                path = output_dir / "covers" / f"{candidate.local_track_key}.jpg"
+                path.parent.mkdir(parents=True, exist_ok=True)
+                if cv2.imwrite(str(path), best[2]):
+                    candidate.cover_image_path = path
+            except Exception:
+                pass
 
     def _get_ocr(self) -> Any:
         if self._ocr_attempted:
@@ -507,6 +553,44 @@ class BasketballAnalyzer:
             return crop if crop.size else None
         except Exception:
             return None
+
+    @staticmethod
+    def _cover_crop_and_score(frame_path: Path, detection: dict[str, float]) -> tuple[Any, float]:
+        """Return a bounded upper-body crop and a comparable sharpness/size score."""
+        try:
+            import cv2
+            image = cv2.imread(str(frame_path))
+            if image is None:
+                return None, 0
+            height, width = image.shape[:2]
+            x1, y1, x2, y2 = (float(detection[key]) for key in ("x1", "y1", "x2", "y2"))
+            box_width, box_height = x2 - x1, y2 - y1
+            if box_width < 16 or box_height < 32:
+                return None, 0
+            left = max(0, int(x1 + box_width * 0.06))
+            right = min(width, int(x2 - box_width * 0.06))
+            top = max(0, int(y1 + box_height * 0.04))
+            bottom = min(height, int(y1 + box_height * 0.78))
+            if right <= left or bottom <= top:
+                return None, 0
+            crop = image[top:bottom, left:right]
+            if crop.size == 0 or crop.shape[0] < 24 or crop.shape[1] < 12:
+                return None, 0
+            gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
+            sharpness = min(1.0, float(cv2.Laplacian(gray, cv2.CV_64F).var()) / 500.0)
+            area_score = min(1.0, (box_width * box_height) / (width * height * 0.12))
+            height_score = min(1.0, box_height / (height * 0.55))
+            edge_touch = sum((x1 <= 1, y1 <= 1, x2 >= width - 1, y2 >= height - 1))
+            edge_penalty = max(0.0, 1.0 - edge_touch * 0.25)
+            score = (0.55 * sharpness + 0.25 * area_score + 0.20 * height_score) * edge_penalty
+            return crop, float(score)
+        except Exception:
+            return None, 0
+
+    @classmethod
+    def cover_score(cls, frame_path: Path, detection: dict[str, float]) -> float:
+        """Score helper kept independent so synthetic-frame tests need no model."""
+        return cls._cover_crop_and_score(frame_path, detection)[1]
 
     @classmethod
     def _ocr_numbers(cls, ocr: Any, crop: Any) -> list[tuple[str, float]]:
