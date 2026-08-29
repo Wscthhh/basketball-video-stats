@@ -23,9 +23,11 @@ ROOT = Path(__file__).resolve().parent.parent
 DATA_DIR = ROOT / "data"
 UPLOAD_DIR = DATA_DIR / "uploads"
 COVERS_DIR = DATA_DIR / "covers"
+CATEGORY_DATA_DIR = DATA_DIR / "training" / "review"
 DB_PATH = DATA_DIR / "courttrace.sqlite3"
 UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 COVERS_DIR.mkdir(parents=True, exist_ok=True)
+CATEGORY_DATA_DIR.mkdir(parents=True, exist_ok=True)
 app = FastAPI(title="COURTTRACE Local Analysis API", version="0.2.0")
 app.add_middleware(CORSMiddleware, allow_origins=["http://127.0.0.1:5173", "http://localhost:5173"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
 app.mount("/media", StaticFiles(directory=UPLOAD_DIR), name="media")
@@ -55,6 +57,7 @@ def init_db() -> None:
         CREATE TABLE IF NOT EXISTS player_tracks (id TEXT PRIMARY KEY, clip_id TEXT NOT NULL, player_id TEXT NOT NULL, local_track_key TEXT NOT NULL, team_id TEXT, confidence REAL NOT NULL DEFAULT 0, UNIQUE(clip_id, local_track_key), FOREIGN KEY(clip_id) REFERENCES clips(id), FOREIGN KEY(player_id) REFERENCES players(id));
         CREATE TABLE IF NOT EXISTS analysis_runs (id TEXT PRIMARY KEY, match_id TEXT NOT NULL, status TEXT NOT NULL, progress REAL NOT NULL DEFAULT 0, device TEXT NOT NULL, error TEXT NOT NULL DEFAULT '', started_at TEXT, finished_at TEXT, created_at TEXT NOT NULL, version TEXT NOT NULL DEFAULT '1', FOREIGN KEY(match_id) REFERENCES matches(id));
         CREATE TABLE IF NOT EXISTS event_revisions (id TEXT PRIMARY KEY, event_id TEXT NOT NULL, status TEXT NOT NULL, payload TEXT NOT NULL, created_at TEXT NOT NULL, FOREIGN KEY(event_id) REFERENCES analysis_events(id));
+        CREATE TABLE IF NOT EXISTS review_samples (id TEXT PRIMARY KEY, match_id TEXT NOT NULL, clip_id TEXT NOT NULL, event_id TEXT NOT NULL UNIQUE, label TEXT NOT NULL, shot_type TEXT, player_id TEXT, seconds REAL NOT NULL, metadata_json TEXT NOT NULL DEFAULT '{}', created_at TEXT NOT NULL, FOREIGN KEY(match_id) REFERENCES matches(id), FOREIGN KEY(clip_id) REFERENCES clips(id), FOREIGN KEY(event_id) REFERENCES analysis_events(id));
         """)
         run_columns = {r["name"] for r in c.execute("PRAGMA table_info(analysis_runs)")}
         for name, definition in {"total_clips": "INTEGER NOT NULL DEFAULT 0", "completed_clips": "INTEGER NOT NULL DEFAULT 0", "details_json": "TEXT NOT NULL DEFAULT '{}'"}.items():
@@ -338,6 +341,35 @@ def shot_points(shot_type: str | None) -> int | None:
     return {"freeThrow": 1, "twoPoint": 2, "threePoint": 3}.get(shot_type)
 
 
+def capture_review_sample(c: sqlite3.Connection, event: sqlite3.Row, match_id: str, clip: sqlite3.Row) -> dict[str, Any]:
+    existing = c.execute("SELECT id FROM review_samples WHERE event_id=?", (event["id"],)).fetchone()
+    if existing:
+        return {"id": existing["id"], "created": False}
+    sample_id = uuid.uuid4().hex
+    sample_dir = CATEGORY_DATA_DIR / match_id / sample_id
+    sample_dir.mkdir(parents=True, exist_ok=True)
+    source = Path(clip["stored_path"])
+    frames: list[str] = []
+    try:
+        import cv2
+        capture = cv2.VideoCapture(str(source))
+        fps = capture.get(cv2.CAP_PROP_FPS) or 30
+        for index, offset in enumerate((-1.5, -0.5, 0, 0.5, 1.5)):
+            capture.set(cv2.CAP_PROP_POS_MSEC, max(0, event["seconds"] + offset) * 1000)
+            ok, frame = capture.read()
+            if not ok:
+                continue
+            frame_path = sample_dir / f"frame-{index:02d}.jpg"
+            cv2.imwrite(str(frame_path), frame, [int(cv2.IMWRITE_JPEG_QUALITY), 92])
+            frames.append(str(frame_path.relative_to(DATA_DIR)))
+        capture.release()
+    except Exception:
+        frames = []
+    metadata = {"frames": frames, "source": "manual-review", "eventType": event["event_type"], "playerId": event["player_id"], "teamId": event["team_id"]}
+    c.execute("INSERT INTO review_samples(id,match_id,clip_id,event_id,label,shot_type,player_id,seconds,metadata_json,created_at) VALUES(?,?,?,?,?,?,?,?,?,?)", (sample_id, match_id, clip["id"], event["id"], "make", event["shot_type"], event["player_id"], event["seconds"], json.dumps(metadata), now()))
+    return {"id": sample_id, "created": True, "frames": frames}
+
+
 def automatic_confirmation(candidate: Any, player_id: str | None, team_id: str | None, duration: float | None) -> dict[str, Any]:
     qualifies = (
         candidate.event_type in {"make", "命中"}
@@ -447,7 +479,7 @@ async def patch_event(event_id: str, data: EventPatch) -> dict[str, Any]:
         if not old: raise HTTPException(404, "event not found")
         values = data.model_dump(exclude_unset=True); status = values.get("status", old["status"])
         if status not in {"pending", "confirmed", "ignored"}: raise HTTPException(422, "status must be pending, confirmed, or ignored")
-        clip = c.execute("SELECT duration FROM clips WHERE id=?", (old["clip_id"],)).fetchone()
+        clip = c.execute("SELECT * FROM clips WHERE id=?", (old["clip_id"],)).fetchone()
         event_type = values.get("type", old["event_type"])
         if event_type not in {"attempt", "make"}: raise HTTPException(422, "type must be attempt or make")
         match_id = c.execute("SELECT match_id FROM clips WHERE id=?", (old["clip_id"],)).fetchone()[0]
@@ -461,7 +493,14 @@ async def patch_event(event_id: str, data: EventPatch) -> dict[str, Any]:
         fields = {"status": status, "player_id": values["player_id"] if "player_id" in values else old["player_id"], "team_id": values["team_id"] if "team_id" in values else old["team_id"], "event_type": event_type, "shot_type": shot_type, "shot_type_source": shot_type_source, "points": points, "confirmed_at": now() if status == "confirmed" else old["confirmed_at"], "updated_at": now(), "highlight_start": max(0, old["seconds"] - 4) if status == "confirmed" and event_type == "make" else None, "highlight_end": min(clip["duration"] or old["seconds"] + 5, old["seconds"] + 5) if status == "confirmed" and event_type == "make" else None, "confirmed_by": "manual" if status == "confirmed" else None, "confirmation_rule": None}
         c.execute("INSERT INTO event_revisions VALUES(?,?,?,?,?)", (uuid.uuid4().hex, event_id, status, json.dumps(values), now()))
         c.execute("UPDATE analysis_events SET status=?,player_id=?,team_id=?,event_type=?,shot_type=?,shot_type_source=?,points=?,confirmed_at=?,updated_at=?,highlight_start=?,highlight_end=?,confirmed_by=?,confirmation_rule=? WHERE id=?", (*fields.values(), event_id))
-        return event_payload(c.execute("SELECT * FROM analysis_events WHERE id=?", (event_id,)).fetchone(), c)
+        updated = c.execute("SELECT * FROM analysis_events WHERE id=?", (event_id,)).fetchone()
+        sample = None
+        if status == "confirmed" and event_type == "make":
+            sample = capture_review_sample(c, updated, match_id, clip)
+        payload = event_payload(updated, c)
+        if sample:
+            payload["reviewSample"] = sample
+        return payload
 
 
 @app.patch("/api/matches/{match_id}/events/{event_id}")
@@ -487,7 +526,11 @@ async def manual_event(match_id: str, data: ManualEvent) -> dict[str, Any]:
         end = min(clip["duration"] or data.seconds + 5, data.seconds + 5) if data.type == "make" else None
         points = shot_points(data.shot_type) if data.type == "make" and data.shot_type else data.points
         c.execute("INSERT INTO analysis_events(id,clip_id,event_type,seconds,confidence,status,player_id,team_id,shot_type,shot_type_confidence,shot_type_source,points,source,highlight_start,highlight_end,updated_at,confirmed_at,confirmed_by) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", (event_id,data.clip_id,data.type,data.seconds,1,"confirmed",data.player_id,data.team_id,data.shot_type,1,"manual",points,"manual",start,end,now(),now(),"manual"))
-        return event_payload(c.execute("SELECT * FROM analysis_events WHERE id=?", (event_id,)).fetchone(), c)
+        updated = c.execute("SELECT * FROM analysis_events WHERE id=?", (event_id,)).fetchone()
+        payload = event_payload(updated, c)
+        if data.type == "make":
+            payload["reviewSample"] = capture_review_sample(c, updated, match_id, clip)
+        return payload
 
 
 @app.post("/api/matches/{match_id}/events", status_code=201)
@@ -504,6 +547,19 @@ async def match_stats(match_id: str) -> list[dict[str, Any]]:
 async def player_highlights(player_id: str) -> list[dict[str, Any]]:
     with db() as c:
         return [event_payload(r, c) for r in c.execute("SELECT e.*,c.match_id,c.duration FROM analysis_events e JOIN clips c ON c.id=e.clip_id WHERE e.player_id=? AND e.event_type='make' AND e.status='confirmed' ORDER BY e.seconds", (player_id,))]
+
+
+@app.get("/api/matches/{match_id}/review-samples")
+async def review_samples(match_id: str) -> list[dict[str, Any]]:
+    with db() as c:
+        require_match(match_id, c)
+        rows = c.execute("SELECT * FROM review_samples WHERE match_id=? ORDER BY created_at DESC", (match_id,)).fetchall()
+        result = []
+        for row in rows:
+            value = camel(row)
+            value["metadata"] = json.loads(row["metadata_json"] or "{}")
+            result.append(value)
+        return result
 
 
 @app.get("/api/matches/{match_id}/players/{player_id}/highlights")
@@ -604,7 +660,7 @@ def cleanup_match_analysis(match_id: str) -> dict[str, int]:
             "SELECT e.id,e.status FROM analysis_events e JOIN clips cl ON cl.id=e.clip_id "
             "WHERE cl.match_id=? AND (e.source IS NULL OR e.source NOT IN ('manual','test-fixture'))", (match_id,)
         ).fetchall()
-        protected = {row["id"] for row in event_rows if row["status"] == "confirmed" and c.execute("SELECT 1 FROM event_revisions WHERE event_id=? LIMIT 1", (row["id"],)).fetchone()}
+        protected = {row["id"] for row in event_rows if row["status"] == "confirmed" and (c.execute("SELECT 1 FROM event_revisions WHERE event_id=? LIMIT 1", (row["id"],)).fetchone() or c.execute("SELECT 1 FROM review_samples WHERE event_id=? LIMIT 1", (row["id"],)).fetchone())}
         removable = [row["id"] for row in event_rows if row["id"] not in protected]
         if removable:
             marks = ",".join("?" for _ in removable)

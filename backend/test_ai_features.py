@@ -7,6 +7,8 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
+from fastapi.testclient import TestClient
+
 import backend.main as main
 from backend.analyzer import AnalysisResult, BasketballAnalyzer, InspectionResult, TrackCandidate
 
@@ -156,6 +158,32 @@ class CoverTest(unittest.TestCase):
                 self.assertIsNone(payloads[1]["coverUrl"])
             finally:
                 main.DB_PATH = old_path
+
+
+class ReviewSampleTest(unittest.TestCase):
+    def test_make_confirmation_creates_one_sample_without_player(self) -> None:
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as directory:
+            old_db, old_data = main.DB_PATH, main.DATA_DIR
+            main.DB_PATH = Path(directory) / "test.sqlite3"
+            main.DATA_DIR = Path(directory)
+            main.CATEGORY_DATA_DIR = Path(directory) / "training" / "review"
+            main.CATEGORY_DATA_DIR.mkdir(parents=True)
+            main.init_db()
+            try:
+                with main.db() as connection:
+                    connection.execute("INSERT INTO matches VALUES(?,?,?,?,?,?,?)", ("m", "Match", None, None, "draft", 0, main.now()))
+                    connection.execute("INSERT INTO teams(id,match_id,side,name) VALUES(?,?,?,?)", ("m-home", "m", "home", "Home"))
+                    connection.execute("INSERT INTO teams(id,match_id,side,name) VALUES(?,?,?,?)", ("m-away", "m", "away", "Away"))
+                    connection.execute("INSERT INTO clips(id,match_id,filename,stored_path,sha256,size_bytes,duration,created_at) VALUES(?,?,?,?,?,?,?,?)", ("c", "m", "missing.mp4", str(Path(directory) / "missing.mp4"), "hash", 1, 10, main.now()))
+                    connection.execute("INSERT INTO analysis_events(id,clip_id,event_type,seconds,status,confidence,shot_type,points) VALUES(?,?,?,?,?,?,?,?)", ("e", "c", "make", 2, "pending", .9, "twoPoint", 2))
+                client = TestClient(main.app)
+                response = client.patch("/api/events/e", json={"status": "confirmed", "shotType": "twoPoint"})
+                self.assertEqual(response.status_code, 200)
+                self.assertEqual(response.json()["reviewSample"]["created"], True)
+                self.assertEqual(len(client.get("/api/matches/m/review-samples").json()), 1)
+                client.close()
+            finally:
+                main.DB_PATH, main.DATA_DIR = old_db, old_data
 
 
 class ReanalysisTest(unittest.TestCase):

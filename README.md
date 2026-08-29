@@ -159,6 +159,22 @@ OCR 是可选依赖，安装方式：
 
 当前启用的自动确认策略仅针对高置信度命中：必须同时满足球员、球队、篮筐穿越、投篮类型和置信度条件。自动确认事件会记录 `confirmedBy=ai` 和 `confirmationRule`；投篮候选、低置信度命中和类型不明确的事件继续进入人工复核。
 
+## 进球训练样本积累
+
+当前可先不绑定球员，直接把复核队列中的事件确认成“命中”。系统会自动从原视频提取事件前后关键帧，写入：
+
+```text
+data/training/review/{matchId}/{sampleId}/frame-*.jpg
+```
+
+样本标签固定为 `make`，同时保存片段、事件时间、投篮类型和球员/球队归属（可为空）。查询当前比赛积累的样本：
+
+```text
+GET /api/matches/{match_id}/review-samples
+```
+
+后续可以基于这些未归属进球样本训练命中/未中模型，再单独做球员匹配，不会改变当前人工复核结果。
+
 ### 算法参考
 
 - [abdullahtarek/basketball_analysis](https://github.com/abdullahtarek/basketball_analysis)：18 点 FIBA 球场映射、球员脚点和单应性思路；仓库未提供独立许可证文件，避免直接复制代码。
