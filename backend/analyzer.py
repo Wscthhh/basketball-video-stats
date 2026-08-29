@@ -12,8 +12,8 @@ from typing import Any
 
 from .court_geometry import ShotClassification, classify_fiba_shot, projection_from_pose_result, transform_point
 
-SAMPLE_FPS = 5
-MAX_FRAMES = 50
+SAMPLE_FPS = 10
+MAX_FRAMES = 140
 
 
 @dataclass
