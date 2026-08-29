@@ -147,6 +147,18 @@ $env:COURTTRACE_COURT_MODEL = 'D:\models\court_keypoint_detector.pt'
 
 球员统计按已确认事件展示罚球、两分、三分的命中/出手以及总得分。
 
+## 号码 OCR 与自动确认
+
+号码识别使用 PaddleOCR 对稳定球员轨迹的上半身区域进行多帧投票，不对整张比赛画面做 OCR。只有同一号码满足多帧一致和置信度阈值时，才会绑定到临时球员；否则继续保留临时编号。
+
+OCR 是可选依赖，安装方式：
+
+```powershell
+.\.venv\Scripts\python.exe -m pip install -r backend\requirements-ocr.txt
+```
+
+当前启用的自动确认策略仅针对高置信度命中：必须同时满足球员、球队、篮筐穿越、投篮类型和置信度条件。自动确认事件会记录 `confirmedBy=ai` 和 `confirmationRule`；投篮候选、低置信度命中和类型不明确的事件继续进入人工复核。
+
 ### 算法参考
 
 - [abdullahtarek/basketball_analysis](https://github.com/abdullahtarek/basketball_analysis)：18 点 FIBA 球场映射、球员脚点和单应性思路；仓库未提供独立许可证文件，避免直接复制代码。

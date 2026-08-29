@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import subprocess
 import tempfile
@@ -40,6 +41,9 @@ class TrackCandidate:
     jersey_rgb: tuple[float, float, float] | None = None
     bbox_aspect: float | None = None
     median_height: float | None = None
+    number: str | None = None
+    number_confidence: float = 0
+    number_candidates: list[dict[str, Any]] = field(default_factory=list)
 
 
 @dataclass
@@ -83,6 +87,9 @@ class BasketballAnalyzer:
             "court": ModelHandle("court", Path(os.getenv("COURTTRACE_COURT_MODEL", "models/court_keypoint_detector.pt")), "pose"),
         }
         self._lock = threading.Lock()
+        self._ocr: Any = None
+        self._ocr_attempted = False
+        self._ocr_error = ""
         self._load_models()
 
     def _load_models(self) -> None:
@@ -120,6 +127,7 @@ class BasketballAnalyzer:
             "ready": self.ready,
             "mode": self.mode,
             "models": {name: handle.status() for name, handle in self.models.items()},
+            "ocr": {"ready": self._ocr is not None, "attempted": self._ocr_attempted, "error": self._ocr_error},
         }
 
     def inspect(self, video_path: Path, device: str = "cpu") -> InspectionResult:
@@ -140,6 +148,7 @@ class BasketballAnalyzer:
             players, hoops = self._collect_detections(player_results, {"player"}, {"hoop"})
             balls, _ = self._collect_detections(ball_results, {"ball", "basketball", "sports ball"}, set(), best_per_frame=True)
             tracks, tracked_players = self._track_players(players, frames)
+            self._recognize_track_numbers(tracks, tracked_players, frames)
             events = self._detect_shot_events(balls, hoops, tracked_players)
             court_keypoints = 0
             if events and self.models["court"].ready:
@@ -422,6 +431,122 @@ class BasketballAnalyzer:
         stable = [TrackCandidate(t["key"], t["confidence"] / max(t["count"], 1), t["count"]) for t in tracks if t["count"] >= 3]
         valid_keys = {track.local_track_key for track in stable}
         return stable, [item for item in detections if item.get("local_track_key") in valid_keys]
+
+    def _get_ocr(self) -> Any:
+        if self._ocr_attempted:
+            return self._ocr
+        self._ocr_attempted = True
+        try:
+            from paddleocr import PaddleOCR  # type: ignore
+
+            self._ocr = PaddleOCR(
+                lang="en",
+                use_doc_orientation_classify=False,
+                use_doc_unwarping=False,
+                use_textline_orientation=False,
+            )
+        except Exception as error:
+            self._ocr_error = str(error)
+            self._ocr = None
+        return self._ocr
+
+    def _recognize_track_numbers(self, tracks: list[TrackCandidate], players: list[dict[str, float]], frames: list[Path]) -> None:
+        ocr = self._get_ocr()
+        if ocr is None:
+            return
+        by_track: dict[str, list[dict[str, float]]] = {}
+        for player in players:
+            by_track.setdefault(str(player["local_track_key"]), []).append(player)
+        for track in tracks:
+            trajectory = sorted(by_track.get(track.local_track_key, []), key=lambda item: item["frame"])
+            representatives = self._representative_detections(trajectory, 8)
+            reads: list[tuple[str, float]] = []
+            for detection in representatives:
+                crop = self._upper_body_crop(frames[int(detection["frame"])], detection)
+                if crop is None:
+                    continue
+                reads.extend(self._ocr_numbers(ocr, crop)[:1])
+            votes: dict[str, list[float]] = {}
+            for number, confidence in reads:
+                votes.setdefault(number, []).append(confidence)
+            track.number_candidates = sorted(
+                ({"number": number, "votes": len(scores), "confidence": round(sum(scores) / len(scores), 4)} for number, scores in votes.items()),
+                key=lambda item: (-item["votes"], -item["confidence"], int(item["number"])),
+            )
+            if not track.number_candidates or not reads:
+                continue
+            winner = track.number_candidates[0]
+            if winner["votes"] >= 5 and winner["votes"] / len(reads) >= 0.6 and winner["confidence"] >= 0.75:
+                track.number = winner["number"]
+                track.number_confidence = winner["confidence"]
+
+    @staticmethod
+    def _representative_detections(detections: list[dict[str, float]], limit: int) -> list[dict[str, float]]:
+        if len(detections) <= limit:
+            return detections
+        return [detections[round(index * (len(detections) - 1) / (limit - 1))] for index in range(limit)]
+
+    @staticmethod
+    def _upper_body_crop(frame_path: Path, detection: dict[str, float]) -> Any:
+        try:
+            import cv2
+
+            image = cv2.imread(str(frame_path))
+            if image is None:
+                return None
+            image_height, image_width = image.shape[:2]
+            x1, y1, x2, y2 = (int(detection[key]) for key in ("x1", "y1", "x2", "y2"))
+            width, height = x2 - x1, y2 - y1
+            if width < 8 or height < 12:
+                return None
+            left = max(0, x1 + int(width * 0.08))
+            right = min(image_width, x2 - int(width * 0.08))
+            top = max(0, y1 + int(height * 0.08))
+            bottom = min(image_height, y1 + int(height * 0.62))
+            crop = image[top:bottom, left:right]
+            return crop if crop.size else None
+        except Exception:
+            return None
+
+    @classmethod
+    def _ocr_numbers(cls, ocr: Any, crop: Any) -> list[tuple[str, float]]:
+        try:
+            if hasattr(ocr, "predict"):
+                result = ocr.predict(input=crop)
+            else:
+                result = ocr.ocr(crop, cls=False)
+        except Exception:
+            return []
+        values: list[tuple[str, float]] = []
+        cls._collect_ocr_values(result, values)
+        return sorted(values, key=lambda item: item[1], reverse=True)
+
+    @classmethod
+    def _collect_ocr_values(cls, value: Any, output: list[tuple[str, float]]) -> None:
+        if hasattr(value, "json"):
+            value = value.json
+            if callable(value):
+                value = value()
+        if isinstance(value, dict):
+            texts, scores = value.get("rec_texts"), value.get("rec_scores")
+            if isinstance(texts, (list, tuple)) and isinstance(scores, (list, tuple)):
+                for text, score in zip(texts, scores):
+                    cls._append_ocr_number(text, score, output)
+                return
+            for nested in value.values():
+                cls._collect_ocr_values(nested, output)
+        elif isinstance(value, (list, tuple)):
+            if len(value) == 2 and isinstance(value[0], str) and isinstance(value[1], (int, float)):
+                cls._append_ocr_number(value[0], value[1], output)
+                return
+            for nested in value:
+                cls._collect_ocr_values(nested, output)
+
+    @staticmethod
+    def _append_ocr_number(text: Any, score: Any, output: list[tuple[str, float]]) -> None:
+        cleaned = re.sub(r"\D", "", str(text))
+        if 1 <= len(cleaned) <= 2 and int(cleaned) <= 99:
+            output.append((str(int(cleaned)), max(0.0, min(1.0, float(score)))))
 
     @staticmethod
     def _sample_jersey_color(frame_path: Path, detection: dict[str, float]) -> tuple[float, float, float] | None:

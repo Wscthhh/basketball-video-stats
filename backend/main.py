@@ -45,10 +45,10 @@ def init_db() -> None:
     with db() as c:
         c.executescript("""
         CREATE TABLE IF NOT EXISTS clips (id TEXT PRIMARY KEY, match_id TEXT NOT NULL, filename TEXT NOT NULL, stored_path TEXT NOT NULL, sha256 TEXT NOT NULL UNIQUE, size_bytes INTEGER NOT NULL, duration REAL, status TEXT NOT NULL DEFAULT 'queued', confidence REAL NOT NULL DEFAULT 0, created_at TEXT NOT NULL);
-        CREATE TABLE IF NOT EXISTS analysis_events (id TEXT PRIMARY KEY, clip_id TEXT NOT NULL, event_type TEXT NOT NULL, seconds REAL NOT NULL, confidence REAL NOT NULL, status TEXT NOT NULL DEFAULT 'pending', player_id TEXT, description TEXT NOT NULL DEFAULT '', source TEXT NOT NULL DEFAULT '', FOREIGN KEY(clip_id) REFERENCES clips(id));
+        CREATE TABLE IF NOT EXISTS analysis_events (id TEXT PRIMARY KEY, clip_id TEXT NOT NULL, event_type TEXT NOT NULL, seconds REAL NOT NULL, confidence REAL NOT NULL, status TEXT NOT NULL DEFAULT 'pending', player_id TEXT, description TEXT NOT NULL DEFAULT '', source TEXT NOT NULL DEFAULT '', confirmed_by TEXT, confirmation_rule TEXT, FOREIGN KEY(clip_id) REFERENCES clips(id));
         CREATE TABLE IF NOT EXISTS matches (id TEXT PRIMARY KEY, name TEXT NOT NULL, played_at TEXT, venue TEXT, status TEXT NOT NULL DEFAULT 'draft', is_test INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS teams (id TEXT PRIMARY KEY, match_id TEXT NOT NULL, side TEXT NOT NULL, name TEXT NOT NULL DEFAULT '', color TEXT, UNIQUE(match_id, side), FOREIGN KEY(match_id) REFERENCES matches(id));
-        CREATE TABLE IF NOT EXISTS players (id TEXT PRIMARY KEY, match_id TEXT NOT NULL, team_id TEXT, code TEXT NOT NULL, name TEXT NOT NULL DEFAULT '', number TEXT, identity_type TEXT NOT NULL DEFAULT 'temporary', status TEXT NOT NULL DEFAULT 'unconfirmed', confidence REAL NOT NULL DEFAULT 0, appearance_r REAL, appearance_g REAL, appearance_b REAL, appearance_samples INTEGER NOT NULL DEFAULT 0, track_count_total INTEGER NOT NULL DEFAULT 0, UNIQUE(match_id, code), FOREIGN KEY(match_id) REFERENCES matches(id));
+        CREATE TABLE IF NOT EXISTS players (id TEXT PRIMARY KEY, match_id TEXT NOT NULL, team_id TEXT, code TEXT NOT NULL, name TEXT NOT NULL DEFAULT '', number TEXT, number_confidence REAL NOT NULL DEFAULT 0, number_source TEXT, number_candidates_json TEXT NOT NULL DEFAULT '[]', identity_type TEXT NOT NULL DEFAULT 'temporary', status TEXT NOT NULL DEFAULT 'unconfirmed', confidence REAL NOT NULL DEFAULT 0, appearance_r REAL, appearance_g REAL, appearance_b REAL, appearance_samples INTEGER NOT NULL DEFAULT 0, track_count_total INTEGER NOT NULL DEFAULT 0, UNIQUE(match_id, code), FOREIGN KEY(match_id) REFERENCES matches(id));
         CREATE TABLE IF NOT EXISTS player_tracks (id TEXT PRIMARY KEY, clip_id TEXT NOT NULL, player_id TEXT NOT NULL, local_track_key TEXT NOT NULL, team_id TEXT, confidence REAL NOT NULL DEFAULT 0, UNIQUE(clip_id, local_track_key), FOREIGN KEY(clip_id) REFERENCES clips(id), FOREIGN KEY(player_id) REFERENCES players(id));
         CREATE TABLE IF NOT EXISTS analysis_runs (id TEXT PRIMARY KEY, match_id TEXT NOT NULL, status TEXT NOT NULL, progress REAL NOT NULL DEFAULT 0, device TEXT NOT NULL, error TEXT NOT NULL DEFAULT '', started_at TEXT, finished_at TEXT, created_at TEXT NOT NULL, version TEXT NOT NULL DEFAULT '1', FOREIGN KEY(match_id) REFERENCES matches(id));
         CREATE TABLE IF NOT EXISTS event_revisions (id TEXT PRIMARY KEY, event_id TEXT NOT NULL, status TEXT NOT NULL, payload TEXT NOT NULL, created_at TEXT NOT NULL, FOREIGN KEY(event_id) REFERENCES analysis_events(id));
@@ -59,14 +59,16 @@ def init_db() -> None:
                 c.execute(f"ALTER TABLE analysis_runs ADD COLUMN {name} {definition}")
         # Existing installations have no parent match table and old event columns.
         for name, definition in {
-            "team_id": "TEXT", "points": "INTEGER", "shot_type": "TEXT", "shot_type_confidence": "REAL NOT NULL DEFAULT 0", "shot_type_source": "TEXT", "court_x": "REAL", "court_y": "REAL", "homography_confidence": "REAL NOT NULL DEFAULT 0", "release_frame": "INTEGER", "run_id": "TEXT", "fingerprint": "TEXT", "highlight_start": "REAL", "highlight_end": "REAL", "confirmed_at": "TEXT", "updated_at": "TEXT", "local_track_key": "TEXT"
+            "team_id": "TEXT", "points": "INTEGER", "shot_type": "TEXT", "shot_type_confidence": "REAL NOT NULL DEFAULT 0", "shot_type_source": "TEXT", "court_x": "REAL", "court_y": "REAL", "homography_confidence": "REAL NOT NULL DEFAULT 0", "release_frame": "INTEGER", "run_id": "TEXT", "fingerprint": "TEXT", "highlight_start": "REAL", "highlight_end": "REAL", "confirmed_at": "TEXT", "updated_at": "TEXT", "local_track_key": "TEXT", "confirmed_by": "TEXT", "confirmation_rule": "TEXT"
         }.items():
             if name not in {r["name"] for r in c.execute("PRAGMA table_info(analysis_events)")}:
                 c.execute(f"ALTER TABLE analysis_events ADD COLUMN {name} {definition}")
         player_columns = {r["name"] for r in c.execute("PRAGMA table_info(players)")}
-        for name, definition in {"appearance_r": "REAL", "appearance_g": "REAL", "appearance_b": "REAL", "appearance_samples": "INTEGER NOT NULL DEFAULT 0", "track_count_total": "INTEGER NOT NULL DEFAULT 0"}.items():
+        for name, definition in {"appearance_r": "REAL", "appearance_g": "REAL", "appearance_b": "REAL", "appearance_samples": "INTEGER NOT NULL DEFAULT 0", "track_count_total": "INTEGER NOT NULL DEFAULT 0", "number_confidence": "REAL NOT NULL DEFAULT 0", "number_source": "TEXT", "number_candidates_json": "TEXT NOT NULL DEFAULT '[]'"}.items():
             if name not in player_columns:
                 c.execute(f"ALTER TABLE players ADD COLUMN {name} {definition}")
+        c.execute("UPDATE players SET number_source='manual',number_confidence=1 WHERE number IS NOT NULL AND number_source IS NULL")
+        c.execute("UPDATE analysis_events SET confirmed_by='manual' WHERE status='confirmed' AND confirmed_by IS NULL AND (source='manual' OR EXISTS (SELECT 1 FROM event_revisions r WHERE r.event_id=analysis_events.id))")
         duplicate_fingerprints = c.execute(
             "SELECT fingerprint FROM analysis_events WHERE fingerprint IS NOT NULL GROUP BY fingerprint HAVING COUNT(*)>1"
         ).fetchall()
@@ -96,7 +98,7 @@ def row_payload(row: sqlite3.Row | None) -> dict[str, Any] | None:
 
 
 def camel(row: sqlite3.Row | dict[str, Any]) -> dict[str, Any]:
-    names = {"match_id": "matchId", "team_id": "teamId", "player_id": "playerId", "clip_id": "clipId", "run_id": "runId", "event_type": "type", "event_id": "eventId", "shot_type": "shotType", "shot_type_confidence": "shotTypeConfidence", "shot_type_source": "shotTypeSource", "court_x": "courtX", "court_y": "courtY", "homography_confidence": "homographyConfidence", "release_frame": "releaseFrame", "local_track_key": "localTrackKey", "identity_type": "identityType", "is_test": "isTest", "played_at": "playedAt", "created_at": "createdAt", "updated_at": "updatedAt", "confirmed_at": "confirmedAt", "highlight_start": "highlightStart", "highlight_end": "highlightEnd", "stored_path": "storedPath", "size_bytes": "sizeBytes", "preview_url": "previewUrl", "started_at": "startedAt", "finished_at": "finishedAt"}
+    names = {"match_id": "matchId", "team_id": "teamId", "player_id": "playerId", "clip_id": "clipId", "run_id": "runId", "event_type": "type", "event_id": "eventId", "shot_type": "shotType", "shot_type_confidence": "shotTypeConfidence", "shot_type_source": "shotTypeSource", "court_x": "courtX", "court_y": "courtY", "homography_confidence": "homographyConfidence", "release_frame": "releaseFrame", "local_track_key": "localTrackKey", "identity_type": "identityType", "is_test": "isTest", "played_at": "playedAt", "created_at": "createdAt", "updated_at": "updatedAt", "confirmed_at": "confirmedAt", "confirmed_by": "confirmedBy", "confirmation_rule": "confirmationRule", "highlight_start": "highlightStart", "highlight_end": "highlightEnd", "stored_path": "storedPath", "size_bytes": "sizeBytes", "preview_url": "previewUrl", "started_at": "startedAt", "finished_at": "finishedAt", "number_confidence": "numberConfidence", "number_source": "numberSource", "number_candidates_json": "numberCandidates"}
     return {names.get(k, k): v for k, v in dict(row).items()}
 
 
@@ -114,6 +116,7 @@ def match_payload(c: sqlite3.Connection, row: sqlite3.Row) -> dict[str, Any]:
 
 def player_payload(c: sqlite3.Connection, row: sqlite3.Row) -> dict[str, Any]:
     value = camel(row)
+    value["numberCandidates"] = json.loads(row["number_candidates_json"] or "[]")
     team = c.execute("SELECT side,color FROM teams WHERE id=?", (row["team_id"],)).fetchone() if row["team_id"] else None
     value["displayName"] = row["name"] or row["code"]
     value["team"] = team["side"] if team else None
@@ -297,12 +300,12 @@ async def upload_clips(match_id: str, files: Annotated[list[UploadFile], File(..
 
 
 def stats_for(c: sqlite3.Connection, match_id: str) -> list[dict[str, Any]]:
-    rows = c.execute("SELECT e.player_id,e.team_id,e.event_type,e.shot_type,e.points,p.name,p.code FROM analysis_events e JOIN clips c ON c.id=e.clip_id LEFT JOIN players p ON p.id=e.player_id WHERE c.match_id=? AND e.status='confirmed'", (match_id,)).fetchall()
+    rows = c.execute("SELECT e.player_id,e.team_id,e.event_type,e.shot_type,e.points,p.name,p.code,p.number,p.number_confidence,p.number_source,p.number_candidates_json FROM analysis_events e JOIN clips c ON c.id=e.clip_id LEFT JOIN players p ON p.id=e.player_id WHERE c.match_id=? AND e.status='confirmed'", (match_id,)).fetchall()
     grouped: dict[str, dict[str, Any]] = {}
     empty_stats = {"attempts": 0, "makes": 0, "points": 0, "freeThrowAttempts": 0, "freeThrowMakes": 0, "twoPointAttempts": 0, "twoPointMakes": 0, "threePointAttempts": 0, "threePointMakes": 0, "unclassifiedAttempts": 0, "unclassifiedMakes": 0}
     unassigned = {"playerId": None, "teamId": None, "name": "Unassigned", "code": "unassigned", **empty_stats}
     for row in rows:
-        item = unassigned if not row["player_id"] else grouped.setdefault(row["player_id"], {"playerId": row["player_id"], "teamId": row["team_id"], "name": row["name"] or row["code"], "code": row["code"], **empty_stats})
+        item = unassigned if not row["player_id"] else grouped.setdefault(row["player_id"], {"playerId": row["player_id"], "teamId": row["team_id"], "name": row["name"] or row["code"], "code": row["code"], "number": row["number"], "numberConfidence": row["number_confidence"], "numberSource": row["number_source"], "numberCandidates": json.loads(row["number_candidates_json"] or "[]"), **empty_stats})
         is_attempt, is_make = row["event_type"] == "attempt", row["event_type"] == "make"
         item["attempts"] += is_attempt; item["makes"] += is_make
         item["points"] += (row["points"] or 0) if is_make else 0
@@ -318,18 +321,47 @@ def stats_for(c: sqlite3.Connection, match_id: str) -> list[dict[str, Any]]:
     return result
 
 
-def event_payload(r: sqlite3.Row) -> dict[str, Any]: return camel(r)
+def event_payload(r: sqlite3.Row, c: sqlite3.Connection | None = None) -> dict[str, Any]:
+    value = camel(r)
+    if c is not None and r["player_id"]:
+        player = c.execute("SELECT number,number_confidence,number_source,number_candidates_json FROM players WHERE id=?", (r["player_id"],)).fetchone()
+        if player:
+            value.update({"number": player["number"], "numberConfidence": player["number_confidence"], "numberSource": player["number_source"], "numberCandidates": json.loads(player["number_candidates_json"] or "[]")})
+    return value
 
 
 def shot_points(shot_type: str | None) -> int | None:
     return {"freeThrow": 1, "twoPoint": 2, "threePoint": 3}.get(shot_type)
 
 
+def automatic_confirmation(candidate: Any, player_id: str | None, team_id: str | None, duration: float | None) -> dict[str, Any]:
+    qualifies = (
+        candidate.event_type in {"make", "命中"}
+        and candidate.confidence >= 0.88
+        and candidate.source == "ball-hoop-crossing"
+        and bool(player_id)
+        and bool(team_id)
+        and candidate.shot_type in {"freeThrow", "twoPoint", "threePoint"}
+        and candidate.shot_type_confidence >= 0.62
+    )
+    if not qualifies:
+        return {"status": "pending", "points": None, "confirmed_at": None, "confirmed_by": None, "confirmation_rule": None, "highlight_start": None, "highlight_end": None}
+    return {
+        "status": "confirmed",
+        "points": shot_points(candidate.shot_type),
+        "confirmed_at": now(),
+        "confirmed_by": "ai",
+        "confirmation_rule": "high-confidence-make",
+        "highlight_start": max(0, candidate.seconds - 4),
+        "highlight_end": min(duration or candidate.seconds + 5, candidate.seconds + 5),
+    }
+
+
 @app.get("/api/matches/{match_id}/workspace")
 async def workspace(match_id: str) -> dict[str, Any]:
     with db() as c:
         match = require_match(match_id, c); teams = [team_payload(r) for r in c.execute("SELECT * FROM teams WHERE match_id=?", (match_id,))]; players = [player_payload(c, r) for r in c.execute("SELECT * FROM players WHERE match_id=?", (match_id,))]
-        clips = [clip_payload(r) for r in c.execute("SELECT * FROM clips WHERE match_id=?", (match_id,))]; events = [event_payload(r) for r in c.execute("SELECT e.* FROM analysis_events e JOIN clips c ON c.id=e.clip_id WHERE c.match_id=? ORDER BY e.seconds", (match_id,))]
+        clips = [clip_payload(r) for r in c.execute("SELECT * FROM clips WHERE match_id=?", (match_id,))]; events = [event_payload(r, c) for r in c.execute("SELECT e.* FROM analysis_events e JOIN clips c ON c.id=e.clip_id WHERE c.match_id=? ORDER BY e.seconds", (match_id,))]
         runs = [run_payload(r) for r in c.execute("SELECT * FROM analysis_runs WHERE match_id=? ORDER BY created_at DESC", (match_id,))]
         return {"match": match_payload(c, match), "teams": teams, "players": players, "clips": clips, "events": events, "stats": stats_for(c, match_id), "runs": runs}
 
@@ -362,7 +394,9 @@ async def patch_player(player_id: str, data: PlayerPatch) -> dict[str, Any]:
             "status": values.get("status", old["status"]),
             "identity_type": values.get("identity_type", old["identity_type"]),
         }
-        c.execute("UPDATE players SET name=?,number=?,team_id=?,status=?,identity_type=? WHERE id=?", (*fields.values(), player_id))
+        number_source = "manual" if "number" in values else old["number_source"]
+        number_confidence = 1 if "number" in values and values["number"] is not None else old["number_confidence"]
+        c.execute("UPDATE players SET name=?,number=?,team_id=?,status=?,identity_type=?,number_source=?,number_confidence=? WHERE id=?", (*fields.values(), number_source, number_confidence, player_id))
         return player_payload(c, c.execute("SELECT * FROM players WHERE id=?", (player_id,)).fetchone())
 
 
@@ -418,10 +452,10 @@ async def patch_event(event_id: str, data: EventPatch) -> dict[str, Any]:
         points = values.get("points", old["points"])
         if event_type == "attempt": points = None
         elif "shot_type" in values and "points" not in values: points = shot_points(shot_type)
-        fields = {"status": status, "player_id": values["player_id"] if "player_id" in values else old["player_id"], "team_id": values["team_id"] if "team_id" in values else old["team_id"], "event_type": event_type, "shot_type": shot_type, "shot_type_source": shot_type_source, "points": points, "confirmed_at": now() if status == "confirmed" else old["confirmed_at"], "updated_at": now(), "highlight_start": max(0, old["seconds"] - 4) if status == "confirmed" and event_type == "make" else None, "highlight_end": min(clip["duration"] or old["seconds"] + 5, old["seconds"] + 5) if status == "confirmed" and event_type == "make" else None}
+        fields = {"status": status, "player_id": values["player_id"] if "player_id" in values else old["player_id"], "team_id": values["team_id"] if "team_id" in values else old["team_id"], "event_type": event_type, "shot_type": shot_type, "shot_type_source": shot_type_source, "points": points, "confirmed_at": now() if status == "confirmed" else old["confirmed_at"], "updated_at": now(), "highlight_start": max(0, old["seconds"] - 4) if status == "confirmed" and event_type == "make" else None, "highlight_end": min(clip["duration"] or old["seconds"] + 5, old["seconds"] + 5) if status == "confirmed" and event_type == "make" else None, "confirmed_by": "manual" if status == "confirmed" else None, "confirmation_rule": None}
         c.execute("INSERT INTO event_revisions VALUES(?,?,?,?,?)", (uuid.uuid4().hex, event_id, status, json.dumps(values), now()))
-        c.execute("UPDATE analysis_events SET status=?,player_id=?,team_id=?,event_type=?,shot_type=?,shot_type_source=?,points=?,confirmed_at=?,updated_at=?,highlight_start=?,highlight_end=? WHERE id=?", (*fields.values(), event_id))
-        return event_payload(c.execute("SELECT * FROM analysis_events WHERE id=?", (event_id,)).fetchone())
+        c.execute("UPDATE analysis_events SET status=?,player_id=?,team_id=?,event_type=?,shot_type=?,shot_type_source=?,points=?,confirmed_at=?,updated_at=?,highlight_start=?,highlight_end=?,confirmed_by=?,confirmation_rule=? WHERE id=?", (*fields.values(), event_id))
+        return event_payload(c.execute("SELECT * FROM analysis_events WHERE id=?", (event_id,)).fetchone(), c)
 
 
 @app.patch("/api/matches/{match_id}/events/{event_id}")
@@ -446,8 +480,8 @@ async def manual_event(match_id: str, data: ManualEvent) -> dict[str, Any]:
         start = max(0, data.seconds - 4) if data.type == "make" else None
         end = min(clip["duration"] or data.seconds + 5, data.seconds + 5) if data.type == "make" else None
         points = shot_points(data.shot_type) if data.type == "make" and data.shot_type else data.points
-        c.execute("INSERT INTO analysis_events(id,clip_id,event_type,seconds,confidence,status,player_id,team_id,shot_type,shot_type_confidence,shot_type_source,points,source,highlight_start,highlight_end,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", (event_id,data.clip_id,data.type,data.seconds,1,"confirmed",data.player_id,data.team_id,data.shot_type,1,"manual",points,"manual",start,end,now()))
-        return event_payload(c.execute("SELECT * FROM analysis_events WHERE id=?", (event_id,)).fetchone())
+        c.execute("INSERT INTO analysis_events(id,clip_id,event_type,seconds,confidence,status,player_id,team_id,shot_type,shot_type_confidence,shot_type_source,points,source,highlight_start,highlight_end,updated_at,confirmed_at,confirmed_by) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", (event_id,data.clip_id,data.type,data.seconds,1,"confirmed",data.player_id,data.team_id,data.shot_type,1,"manual",points,"manual",start,end,now(),now(),"manual"))
+        return event_payload(c.execute("SELECT * FROM analysis_events WHERE id=?", (event_id,)).fetchone(), c)
 
 
 @app.post("/api/matches/{match_id}/events", status_code=201)
@@ -463,14 +497,14 @@ async def match_stats(match_id: str) -> list[dict[str, Any]]:
 @app.get("/api/players/{player_id}/highlights")
 async def player_highlights(player_id: str) -> list[dict[str, Any]]:
     with db() as c:
-        return [event_payload(r) for r in c.execute("SELECT e.*,c.match_id,c.duration FROM analysis_events e JOIN clips c ON c.id=e.clip_id WHERE e.player_id=? AND e.event_type='make' AND e.status='confirmed' ORDER BY e.seconds", (player_id,))]
+        return [event_payload(r, c) for r in c.execute("SELECT e.*,c.match_id,c.duration FROM analysis_events e JOIN clips c ON c.id=e.clip_id WHERE e.player_id=? AND e.event_type='make' AND e.status='confirmed' ORDER BY e.seconds", (player_id,))]
 
 
 @app.get("/api/matches/{match_id}/players/{player_id}/highlights")
 async def match_player_highlights(match_id: str, player_id: str) -> list[dict[str, Any]]:
     with db() as c:
         require_match(match_id, c)
-        return [event_payload(r) for r in c.execute("SELECT e.*,c.match_id,c.duration FROM analysis_events e JOIN clips c ON c.id=e.clip_id WHERE c.match_id=? AND e.player_id=? AND e.event_type='make' AND e.status='confirmed' ORDER BY e.seconds", (match_id, player_id))]
+        return [event_payload(r, c) for r in c.execute("SELECT e.*,c.match_id,c.duration FROM analysis_events e JOIN clips c ON c.id=e.clip_id WHERE c.match_id=? AND e.player_id=? AND e.event_type='make' AND e.status='confirmed' ORDER BY e.seconds", (match_id, player_id))]
 
 
 def command_available(command: str) -> bool: return resolve_command(command) is not None
@@ -517,6 +551,13 @@ def appearance_distance(rgb: tuple[float, float, float] | None, row: sqlite3.Row
 
 def match_track_candidate(track: Any, players: list[sqlite3.Row | dict[str, Any]], team_id: str | None = None) -> sqlite3.Row | dict[str, Any] | None:
     """Match one clip-local track to the best temporary identity for this match."""
+    if getattr(track, "number", None) is not None:
+        for player in players:
+            keys = player.keys()
+            player_number = player["number"] if "number" in keys else None
+            player_team = player["team_id"]
+            if player_number == track.number and (not team_id or not player_team or player_team == team_id):
+                return player
     ranked = []
     for player in players:
         player_team = player["team_id"]
@@ -596,7 +637,7 @@ async def run_analysis(run_id: str, match_id: str, clip_ids: list[str], device: 
                     player = match_track_candidate(track, [item for item in existing_players if item["id"] not in used_player_ids], team_id)
                     if player is None:
                         player = {"id": uuid.uuid4().hex, "team_id": team_id}
-                        c.execute("INSERT INTO players(id,match_id,team_id,code,name,identity_type,status,confidence,appearance_r,appearance_g,appearance_b,appearance_samples,track_count_total) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)", (player["id"], match_id, team_id, f"tmp-{uuid.uuid4().hex[:12]}", "", "temporary", "unconfirmed", track.confidence, None, None, None, 0, 0))
+                        c.execute("INSERT INTO players(id,match_id,team_id,code,name,identity_type,status,confidence,appearance_r,appearance_g,appearance_b,appearance_samples,track_count_total,number,number_confidence,number_source,number_candidates_json) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", (player["id"], match_id, team_id, f"tmp-{uuid.uuid4().hex[:12]}", "", "temporary", "unconfirmed", track.confidence, None, None, None, 0, 0, track.number, track.number_confidence, "ai" if track.number else None, json.dumps(track.number_candidates)))
                         existing_players.append(c.execute("SELECT * FROM players WHERE id=?", (player["id"],)).fetchone())
                     player_id = player["id"]
                     used_player_ids.add(player_id)
@@ -609,23 +650,51 @@ async def run_analysis(run_id: str, match_id: str, clip_ids: list[str], device: 
                         c.execute("UPDATE players SET appearance_r=?,appearance_g=?,appearance_b=?,appearance_samples=?,confidence=MAX(confidence,?),track_count_total=track_count_total+?,team_id=COALESCE(team_id,?) WHERE id=?", (*appearance, total, track.confidence, track.detections, team_id, player_id))
                     else:
                         c.execute("UPDATE players SET confidence=MAX(confidence,?),track_count_total=track_count_total+?,team_id=COALESCE(team_id,?) WHERE id=?", (track.confidence, track.detections, team_id, player_id))
+                    old = c.execute("SELECT * FROM players WHERE id=?", (player_id,)).fetchone()
+                    if old["number_source"] != "manual" and track.number_candidates:
+                        if track.number:
+                            c.execute("UPDATE players SET number=?,number_confidence=?,number_source='ai',number_candidates_json=? WHERE id=?", (track.number, track.number_confidence, json.dumps(track.number_candidates), player_id))
+                            side = c.execute("SELECT side FROM teams WHERE id=?", (old["team_id"] or team_id,)).fetchone()
+                            numbered_code = f"{side['side'] if side else 'player'}-{track.number}"
+                            if not c.execute("SELECT 1 FROM players WHERE match_id=? AND code=? AND id<>?", (match_id, numbered_code, player_id)).fetchone():
+                                c.execute("UPDATE players SET code=? WHERE id=? AND identity_type IN ('temporary','unconfirmed')", (numbered_code, player_id))
+                        else:
+                            c.execute("UPDATE players SET number_candidates_json=? WHERE id=?", (json.dumps(track.number_candidates), player_id))
                     track_players[track.local_track_key] = player_id
                     prior_track = c.execute("SELECT id FROM player_tracks WHERE clip_id=? AND local_track_key=?", (clip_id, track.local_track_key)).fetchone()
                     c.execute("INSERT OR REPLACE INTO player_tracks(id,clip_id,player_id,local_track_key,team_id,confidence) VALUES(?,?,?,?,?,?)", (prior_track["id"] if prior_track else uuid.uuid4().hex, clip_id, player_id, track.local_track_key, team_id, track.confidence))
                 for candidate in inspection.events:
                     event_type = {"投篮": "attempt", "命中": "make"}.get(candidate.event_type, candidate.event_type)
                     fingerprint = f"{clip_id}/{event_type}/{int(candidate.seconds/0.2)}/{candidate.source}"
-                    existing = c.execute("SELECT id,status,shot_type_source FROM analysis_events WHERE fingerprint=?", (fingerprint,)).fetchone()
+                    existing = c.execute("SELECT * FROM analysis_events WHERE fingerprint=?", (fingerprint,)).fetchone()
                     event_team_id = c.execute("SELECT team_id FROM players WHERE id=?", (track_players.get(candidate.local_track_key),)).fetchone() if candidate.local_track_key else None
                     inferred_team_id = event_team_id["team_id"] if event_team_id else None
-                    if existing and existing["status"] in {"confirmed", "ignored"}: continue
+                    player_id = track_players.get(candidate.local_track_key)
+                    confirmation = automatic_confirmation(candidate, player_id, inferred_team_id, clip["duration"])
+                    if existing and (existing["confirmed_by"] == "manual" or existing["status"] == "ignored"):
+                        continue
                     if existing:
+                        update = {
+                            "event_type": event_type, "seconds": candidate.seconds, "confidence": candidate.confidence,
+                            "description": candidate.description, "source": candidate.source, "run_id": run_id,
+                            "local_track_key": candidate.local_track_key, "player_id": player_id, "team_id": inferred_team_id,
+                            "court_x": candidate.court_x, "court_y": candidate.court_y,
+                            "homography_confidence": candidate.homography_confidence, "release_frame": candidate.release_frame,
+                            "updated_at": now(), **confirmation,
+                        }
                         if existing["shot_type_source"] == "manual":
-                            c.execute("UPDATE analysis_events SET event_type=?,seconds=?,confidence=?,description=?,source=?,run_id=?,local_track_key=?,player_id=?,team_id=?,updated_at=? WHERE id=?", (event_type,candidate.seconds,candidate.confidence,candidate.description,candidate.source,run_id,candidate.local_track_key,track_players.get(candidate.local_track_key),inferred_team_id,now(),existing["id"]))
+                            update["shot_type"], update["shot_type_confidence"], update["shot_type_source"] = existing["shot_type"], existing["shot_type_confidence"], existing["shot_type_source"]
+                            update["points"] = existing["points"]
+                            if confirmation["status"] == "confirmed":
+                                update["points"] = existing["points"] if existing["points"] is not None else shot_points(existing["shot_type"])
                         else:
-                            c.execute("UPDATE analysis_events SET event_type=?,seconds=?,confidence=?,description=?,source=?,run_id=?,local_track_key=?,player_id=?,team_id=?,shot_type=?,shot_type_confidence=?,shot_type_source=?,court_x=?,court_y=?,homography_confidence=?,release_frame=?,updated_at=? WHERE id=?", (event_type,candidate.seconds,candidate.confidence,candidate.description,candidate.source,run_id,candidate.local_track_key,track_players.get(candidate.local_track_key),inferred_team_id,candidate.shot_type,candidate.shot_type_confidence,candidate.shot_type_source,candidate.court_x,candidate.court_y,candidate.homography_confidence,candidate.release_frame,now(),existing["id"]))
+                            update["shot_type"], update["shot_type_confidence"], update["shot_type_source"] = candidate.shot_type, candidate.shot_type_confidence, candidate.shot_type_source
+                        revision = {"source": "reanalysis", "before": dict(existing), "after": update}
+                        c.execute("INSERT INTO event_revisions VALUES(?,?,?,?,?)", (uuid.uuid4().hex, existing["id"], update["status"], json.dumps(revision), now()))
+                        assignments = ",".join(f"{name}=:{name}" for name in update)
+                        c.execute(f"UPDATE analysis_events SET {assignments} WHERE id=:id", {**update, "id": existing["id"]})
                     else:
-                        c.execute("INSERT INTO analysis_events(id,clip_id,event_type,seconds,confidence,status,description,source,run_id,fingerprint,local_track_key,player_id,team_id,shot_type,shot_type_confidence,shot_type_source,court_x,court_y,homography_confidence,release_frame,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", (f"ai-{uuid.uuid4().hex}",clip_id,event_type,candidate.seconds,candidate.confidence,"pending",candidate.description,candidate.source,run_id,fingerprint,candidate.local_track_key,track_players.get(candidate.local_track_key),inferred_team_id,candidate.shot_type,candidate.shot_type_confidence,candidate.shot_type_source,candidate.court_x,candidate.court_y,candidate.homography_confidence,candidate.release_frame,now()))
+                        c.execute("INSERT INTO analysis_events(id,clip_id,event_type,seconds,confidence,status,description,source,run_id,fingerprint,local_track_key,player_id,team_id,shot_type,shot_type_confidence,shot_type_source,court_x,court_y,homography_confidence,release_frame,updated_at,points,confirmed_at,confirmed_by,confirmation_rule,highlight_start,highlight_end) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", (f"ai-{uuid.uuid4().hex}",clip_id,event_type,candidate.seconds,candidate.confidence,confirmation["status"],candidate.description,candidate.source,run_id,fingerprint,candidate.local_track_key,player_id,inferred_team_id,candidate.shot_type,candidate.shot_type_confidence,candidate.shot_type_source,candidate.court_x,candidate.court_y,candidate.homography_confidence,candidate.release_frame,now(),confirmation["points"],confirmation["confirmed_at"],confirmation["confirmed_by"],confirmation["confirmation_rule"],confirmation["highlight_start"],confirmation["highlight_end"]))
                 c.execute("UPDATE analysis_runs SET progress=?,completed_clips=? WHERE id=?", (round(index / max(len(clip_ids), 1) * 100, 1), index, run_id))
         with db() as c:
             c.execute("UPDATE analysis_runs SET status=?,progress=100,error=?,details_json=?,finished_at=? WHERE id=?", ("failed" if errors else "completed", "; ".join(errors.values()), json.dumps({"errors": errors}), now(), run_id))

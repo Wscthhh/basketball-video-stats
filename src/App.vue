@@ -529,7 +529,7 @@ onBeforeUnmount(stopPolling)
       <div class="engine-card">
         <div class="engine-card-top"><span class="live-dot"></span><span>本地推理引擎</span><Cpu :size="15" /></div>
         <strong>{{ health?.analyzer?.mode || '未连接' }}</strong>
-        <small>{{ health?.analyzer?.ready ? '模型已就绪' : '模型未就绪' }}<template v-if="readyModels"> · {{ readyModels }}</template></small>
+        <small>{{ health?.analyzer?.ready ? '模型已就绪' : '模型未就绪' }}<template v-if="readyModels"> · {{ readyModels }}</template><template v-if="health?.analyzer?.ocr?.ready"> · OCR</template></small>
       </div>
     </aside>
 
@@ -686,7 +686,7 @@ onBeforeUnmount(stopPolling)
             <div v-if="players.length" class="roster-columns">
               <button v-for="player in players" :key="player.id" class="roster-row" type="button" @click="editPlayer(player)">
                 <span class="roster-number" :style="{ background: player.color || '#87958b' }">{{ player.number || '?' }}</span>
-                <span><strong>{{ playerDisplay(player) }}</strong><small>{{ teamName(player.teamId) }} · {{ player.identityType === 'temporary' ? '临时身份' : '已确认身份' }} · {{ player.tracks ?? 0 }} 段轨迹</small></span>
+                <span><strong>{{ playerDisplay(player) }}</strong><small>{{ teamName(player.teamId) }} · {{ player.numberSource === 'ai' ? `OCR ${Math.round((player.numberConfidence ?? 0) * 100)}%` : player.identityType === 'temporary' ? '临时身份' : '已确认身份' }} · {{ player.tracks ?? 0 }} 段轨迹</small></span>
                 <Settings2 :size="15" />
               </button>
             </div>
