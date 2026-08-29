@@ -17,7 +17,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from .analyzer import BasketballAnalyzer, analyzer_status
+from .analyzer import BasketballAnalyzer, analyzer_status, resolve_command
 
 ROOT = Path(__file__).resolve().parent.parent
 DATA_DIR = ROOT / "data"
@@ -76,7 +76,7 @@ def init_db() -> None:
 
 
 def command_available(command: str) -> bool:
-    return shutil.which(command) is not None
+    return resolve_command(command) is not None
 
 
 def cuda_available() -> bool:
@@ -88,12 +88,21 @@ def cuda_available() -> bool:
         return False
 
 
+def torch_installed() -> bool:
+    try:
+        import torch  # type: ignore
+
+        return bool(torch.__version__)
+    except ImportError:
+        return False
+
+
 def probe_duration(path: Path) -> float | None:
     if not command_available("ffprobe"):
         return None
     try:
         result = subprocess.run(
-            ["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "default=noprint_wrappers=1:nokey=1", str(path)],
+            [resolve_command("ffprobe") or "ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "default=noprint_wrappers=1:nokey=1", str(path)],
             capture_output=True,
             text=True,
             timeout=30,
@@ -143,7 +152,7 @@ async def health() -> dict[str, object]:
         "ok": True,
         "device": "cuda" if has_cuda else "cpu",
         "cuda": has_cuda,
-        "torchInstalled": has_cuda,
+        "torchInstalled": torch_installed(),
         "ffmpeg": command_available("ffmpeg"),
         "ffprobe": command_available("ffprobe"),
         "mode": "GPU 加速" if has_cuda else "CPU fallback",

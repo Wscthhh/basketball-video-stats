@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import shutil
 import subprocess
 import tempfile
 from dataclasses import dataclass
@@ -49,8 +50,11 @@ class BasketballAnalyzer:
 
         with tempfile.TemporaryDirectory(prefix="courttrace-") as frame_dir:
             output = Path(frame_dir)
+            ffmpeg = resolve_command("ffmpeg")
+            if not ffmpeg:
+                return [AnalysisResult("投篮", 3.2, 0.55, "未找到 FFmpeg，无法抽取视频画面", "fallback")]
             extract = subprocess.run(
-                ["ffmpeg", "-hide_banner", "-loglevel", "error", "-i", str(video_path), "-vf", "fps=4,scale=960:-1", "-frames:v", "40", str(output / "frame-%03d.jpg")],
+                [ffmpeg, "-hide_banner", "-loglevel", "error", "-i", str(video_path), "-vf", "fps=4,scale=960:-1", "-frames:v", "40", str(output / "frame-%03d.jpg")],
                 capture_output=True,
                 text=True,
                 timeout=90,
@@ -72,3 +76,14 @@ class BasketballAnalyzer:
 def analyzer_status() -> dict[str, object]:
     analyzer = BasketballAnalyzer()
     return {"ready": analyzer.ready, "mode": analyzer.mode, "modelPath": str(analyzer.model_path), "error": analyzer.load_error}
+
+
+def resolve_command(command: str) -> str | None:
+    direct = shutil.which(command)
+    if direct:
+        return direct
+    local_app_data = os.getenv("LOCALAPPDATA")
+    if not local_app_data:
+        return None
+    candidates = sorted(Path(local_app_data).glob(f"Microsoft/WinGet/Packages/Gyan.FFmpeg_*/ffmpeg-*/bin/{command}.exe"), reverse=True)
+    return str(candidates[0]) if candidates else None

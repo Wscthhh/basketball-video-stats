@@ -94,6 +94,14 @@ cd D:\projects\basketball-video-stats
 .\.venv\Scripts\python.exe -m pip install ultralytics torch torchvision
 ```
 
+本项目也提供了 GTX 10 系列可用的 CUDA 11.8 依赖清单：
+
+```powershell
+.\.venv\Scripts\python.exe -m pip install -r backend\requirements-gpu.txt
+```
+
+没有 NVIDIA 显卡时只安装默认的 `backend/requirements.txt` 即可；有 NVIDIA 显卡时使用 `requirements-gpu.txt`，安装包约 3 GB。
+
 也可以通过环境变量指定权重：
 
 ```powershell
