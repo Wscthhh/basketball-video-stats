@@ -11,7 +11,5 @@ __pycache__/
 data/*.sqlite3
 data/uploads/
 
-# Model weights and datasets should use Git LFS or a separate storage location.
-models/*.pt
-models/*.onnx
+# Model weights are stored in this private repository through Git LFS.
 datasets/

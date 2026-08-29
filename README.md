@@ -84,11 +84,23 @@ cd D:\projects\basketball-video-stats
 - `GET /api/tasks/{task_id}`：轮询分析进度
 - `GET /api/matches/{match_id}/events`：读取候选事件
 
-视觉模型尚未绑定具体权重。当前分析器会生成可替换的候选事件，下一步将把球员检测、跟踪、号码 OCR 和事件识别接入 `run_analysis`，不改变前端 API 契约。
+视觉分析已接入球员、篮球和球场关键点三份预训练权重。当前会生成疑似投篮和命中候选，所有候选仍需人工复核；球员跨片段跟踪、号码 OCR 和球队颜色聚类是后续识别阶段。
 
 ## 接入视觉模型
 
-将训练好的 YOLO 权重放到 `models/basketball-yolo.pt`，并安装可选依赖：
+当前分析器使用三个独立权重：
+
+- `models/player_detector.pt`：球员、篮筐和裁判检测
+- `models/ball_detector_model.pt`：篮球检测和轨迹采样
+- `models/court_keypoint_detector.pt`：球场关键点检测
+
+仓库通过 Git LFS 保存权重。克隆后先执行 `git lfs pull`；权重缺失时也可以运行：
+
+```powershell
+.\scripts\download-models.ps1
+```
+
+安装可选视觉依赖：
 
 ```powershell
 .\.venv\Scripts\python.exe -m pip install ultralytics torch torchvision
@@ -102,10 +114,12 @@ cd D:\projects\basketball-video-stats
 
 没有 NVIDIA 显卡时只安装默认的 `backend/requirements.txt` 即可；有 NVIDIA 显卡时使用 `requirements-gpu.txt`，安装包约 3 GB。
 
-也可以通过环境变量指定权重：
+也可以通过环境变量分别指定权重：
 
 ```powershell
-$env:COURTTRACE_MODEL = 'D:\models\basketball-yolo.pt'
+$env:COURTTRACE_PLAYER_MODEL = 'D:\models\player_detector.pt'
+$env:COURTTRACE_BALL_MODEL = 'D:\models\ball_detector_model.pt'
+$env:COURTTRACE_COURT_MODEL = 'D:\models\court_keypoint_detector.pt'
 ```
 
-当前适配器已经完成视频抽帧和检测调用。球员跟踪、号码 OCR、球队颜色聚类和投篮命中判断需要使用针对篮球场景标注的数据训练专用权重，不能直接用通用 COCO 权重代替。
+当前适配器已经完成视频抽帧、多模型 GPU 推理、球员/篮球/篮筐类别提取、球场关键点统计和疑似投篮轨迹判断。球员跨片段身份、号码 OCR 和球队颜色聚类仍需继续接入；所有 AI 事件默认进入人工复核，不直接作为最终统计。

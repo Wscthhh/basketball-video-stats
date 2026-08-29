@@ -17,7 +17,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from .analyzer import BasketballAnalyzer, analyzer_status, resolve_command
+from .analyzer import BasketballAnalyzer, resolve_command
 
 ROOT = Path(__file__).resolve().parent.parent
 DATA_DIR = ROOT / "data"
@@ -69,10 +69,17 @@ def init_db() -> None:
               confidence REAL NOT NULL,
               status TEXT NOT NULL DEFAULT 'pending',
               player_id TEXT,
+              description TEXT NOT NULL DEFAULT '',
+              source TEXT NOT NULL DEFAULT '',
               FOREIGN KEY(clip_id) REFERENCES clips(id)
             );
             """
         )
+        columns = {row["name"] for row in connection.execute("PRAGMA table_info(analysis_events)").fetchall()}
+        if "description" not in columns:
+            connection.execute("ALTER TABLE analysis_events ADD COLUMN description TEXT NOT NULL DEFAULT ''")
+        if "source" not in columns:
+            connection.execute("ALTER TABLE analysis_events ADD COLUMN source TEXT NOT NULL DEFAULT ''")
 
 
 def command_available(command: str) -> bool:
@@ -156,7 +163,7 @@ async def health() -> dict[str, object]:
         "ffmpeg": command_available("ffmpeg"),
         "ffprobe": command_available("ffprobe"),
         "mode": "GPU 加速" if has_cuda else "CPU fallback",
-        "analyzer": analyzer_status(),
+        "analyzer": ANALYZER.status(),
     }
 
 
@@ -207,11 +214,21 @@ async def run_analysis(task_id: str, match_id: str, clip_ids: list[str], device:
     for index, clip_id in enumerate(clip_ids, start=1):
         with db() as connection:
             clip = connection.execute("SELECT stored_path FROM clips WHERE id = ? AND match_id = ?", (clip_id, match_id)).fetchone()
-        candidates = await asyncio.to_thread(ANALYZER.inspect, Path(clip["stored_path"]), device) if clip else []
+        inspection = await asyncio.to_thread(ANALYZER.inspect, Path(clip["stored_path"]), device) if clip else None
         with db() as connection:
-            connection.execute("UPDATE clips SET status = 'review', confidence = ? WHERE id = ? AND match_id = ?", (0.82, clip_id, match_id))
+            candidates = inspection.events if inspection else []
+            confidence = max((candidate.confidence for candidate in candidates), default=0)
+            status = "review" if inspection and not inspection.error else "failed"
+            connection.execute("UPDATE clips SET status = ?, confidence = ? WHERE id = ? AND match_id = ?", (status, confidence, clip_id, match_id))
+            connection.execute("DELETE FROM analysis_events WHERE clip_id = ? AND id LIKE 'ai-%' AND status = 'pending'", (clip_id,))
             for candidate in candidates:
-                connection.execute("INSERT INTO analysis_events (id, clip_id, event_type, seconds, confidence) VALUES (?, ?, ?, ?, ?)", (f"ai-{uuid.uuid4().hex}", clip_id, candidate.event_type, candidate.seconds, candidate.confidence))
+                connection.execute(
+                    "INSERT INTO analysis_events (id, clip_id, event_type, seconds, confidence, description, source) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    (f"ai-{uuid.uuid4().hex}", clip_id, candidate.event_type, candidate.seconds, candidate.confidence, candidate.description, candidate.source),
+                )
+        details = task.setdefault("details", {})
+        if isinstance(details, dict):
+            details[clip_id] = {"metrics": inspection.metrics if inspection else {}, "error": inspection.error if inspection else "clip not found"}
         task["completed"] = index
         task["progress"] = round(index / total * 100, 1) if total else 100
     task["status"] = "completed"
