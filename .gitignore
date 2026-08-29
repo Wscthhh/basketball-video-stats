@@ -10,6 +10,7 @@ __pycache__/
 # Local database is kept in the private project directory, but not committed by default.
 data/*.sqlite3
 data/uploads/
+data/covers/
 
 # Model weights are stored in this private repository through Git LFS.
 datasets/
