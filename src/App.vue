@@ -23,6 +23,19 @@ import {
 import { api } from './api'
 import type { Clip, EventRecord, Health, Match, Player, Run, ShotType, TabKey, Workspace } from './types'
 
+const jerseyColors = [
+  { name: '白色', value: '#F4F5F0' },
+  { name: '黑色', value: '#171A18' },
+  { name: '红色', value: '#D73A3A' },
+  { name: '蓝色', value: '#3267D6' },
+  { name: '深蓝', value: '#17345C' },
+  { name: '绿色', value: '#249464' },
+  { name: '黄色', value: '#F2C94C' },
+  { name: '橙色', value: '#F28C28' },
+  { name: '紫色', value: '#7548B8' },
+  { name: '灰色', value: '#8A9490' },
+]
+
 const tab = ref<TabKey>('overview')
 const matches = ref<Match[]>([])
 const match = ref<Match | null>(null)
@@ -56,9 +69,9 @@ const createDraft = reactive({
   playedAt: '',
   venue: '',
   homeName: '',
-  homeColor: '#d7ff4d',
+  homeColor: '#F4F5F0',
   awayName: '',
-  awayColor: '#ff765c',
+  awayColor: '#171A18',
 })
 const playerDraft = reactive<Partial<Player>>({})
 const manualDraft = reactive<{ type: 'attempt' | 'make'; shotType: ShotType; playerId: string; seconds: number }>({ type: 'attempt', shotType: 'twoPoint', playerId: '', seconds: 0 })
@@ -73,12 +86,26 @@ const selectedEvents = computed(() => events.value.filter((event) => event.clipI
 const selectedPlayer = computed(() => players.value.find((player) => player.id === selectedPlayerId.value))
 const pendingCount = computed(() => events.value.filter((event) => event.status === 'pending').length)
 const confirmedCount = computed(() => events.value.filter((event) => event.status === 'confirmed').length)
+const candidateCount = computed(() => events.value.filter((event) => event.status === 'pending').length)
 const currentRun = computed<Run | undefined>(() => runs.value[0])
 const teamTabs = computed(() => [...(workspace.value?.teams ?? [])].sort((left, right) => (left.side === 'home' ? 0 : 1) - (right.side === 'home' ? 0 : 1)))
 const selectedTeam = computed(() => workspace.value?.teams.find((team) => team.id === selectedTeamId.value) ?? teamTabs.value[0])
+function eventTeamId(event: EventRecord) {
+  return event.teamId ?? players.value.find((player) => player.id === event.playerId)?.teamId ?? null
+}
+const selectedTeamEvents = computed(() => events.value.filter((event) => eventTeamId(event) === selectedTeamId.value && event.status !== 'ignored'))
 const teamStats = computed(() => workspace.value?.stats.filter((row) => row.teamId === selectedTeamId.value) ?? [])
-const teamHighlights = computed(() => events.value.filter((event) => event.teamId === selectedTeamId.value && event.type === 'make' && event.status === 'confirmed'))
-const teamTotals = computed(() => teamStats.value.reduce((totals, row) => ({ attempts: totals.attempts + row.attempts, makes: totals.makes + row.makes, points: totals.points + row.points }), { attempts: 0, makes: 0, points: 0 }))
+const teamCandidateEvents = computed(() => selectedTeamEvents.value.filter((event) => event.status === 'pending'))
+const teamHighlights = computed(() => selectedTeamEvents.value.filter((event) => event.type === 'make'))
+const teamAnalysisTotals = computed(() => {
+  const confirmed = teamStats.value.reduce((totals, row) => ({ attempts: totals.attempts + row.attempts, makes: totals.makes + row.makes, points: totals.points + row.points }), { attempts: 0, makes: 0, points: 0 })
+  return {
+    attempts: confirmed.attempts + teamCandidateEvents.value.filter((event) => event.type === 'attempt').length,
+    makes: confirmed.makes + teamCandidateEvents.value.filter((event) => event.type === 'make').length,
+    points: confirmed.points,
+  }
+})
+const teamTotals = computed(() => teamAnalysisTotals.value)
 const filteredClips = computed(() => clips.value.filter((clip) => {
   const matchesSearch = !search.value || clip.name.toLowerCase().includes(search.value.toLowerCase())
   return matchesSearch && (filter.value === 'all' || clip.status === filter.value)
@@ -122,7 +149,8 @@ async function boot() {
     health.value = await api.health()
     matches.value = await api.matches()
     if (matches.value.length) {
-      await loadWorkspace(matches.value[0].id)
+      const firstMatch = matches.value.find((item) => !item.isTest) ?? matches.value[0]
+      await loadWorkspace(firstMatch.id)
     }
   } catch (error) {
     health.value = null
@@ -413,6 +441,11 @@ function shotPoints(type?: ShotType | null) {
   return ({ freeThrow: 1, twoPoint: 2, threePoint: 3 } as Record<ShotType, number>)[type]
 }
 
+function selectJerseyColor(side: 'home' | 'away', color: string) {
+  if (side === 'home') createDraft.homeColor = color
+  else createDraft.awayColor = color
+}
+
 function statusLabel(status?: string) {
   return ({ queued: '排队中', processing: '分析中', review: '待复核', ready: '已完成', failed: '失败', interrupted: '已中断', running: '分析中', completed: '已完成' } as Record<string, string>)[status ?? ''] ?? '暂无任务'
 }
@@ -509,6 +542,7 @@ onBeforeUnmount(stopPolling)
           <section class="metric-strip">
             <div class="metric-cell metric-primary"><div class="metric-label">已接收片段</div><div class="metric-value">{{ clips.length }}</div><div class="metric-subline">当前比赛素材</div></div>
             <div class="metric-cell"><div class="metric-label">已确认事件</div><div class="metric-value">{{ confirmedCount }}</div><div class="metric-subline">{{ pendingCount }} 条等待复核</div></div>
+            <div class="metric-cell"><div class="metric-label">AI 候选事件</div><div class="metric-value">{{ candidateCount }}</div><div class="metric-subline">待绑定球员和球队</div></div>
             <div class="metric-cell"><div class="metric-label">分析任务</div><div class="metric-value run-value">{{ statusLabel(currentRun?.status) }}</div><div class="metric-subline"><template v-if="currentRun">{{ currentRun.completed ?? 0 }} / {{ currentRun.total ?? 0 }} · {{ currentRun.progress ?? 0 }}%</template><template v-else>尚未提交分析</template></div></div>
           </section>
 
@@ -530,15 +564,15 @@ onBeforeUnmount(stopPolling)
             </div>
 
             <div class="team-summary-strip">
-              <div><span>球员</span><strong>{{ teamStats.length }}</strong></div>
+              <div><span>球员</span><strong>{{ teamStats.length || new Set(teamCandidateEvents.map((event) => event.playerId).filter(Boolean)).size }}</strong></div>
               <div><span>投篮</span><strong>{{ teamTotals.attempts }}</strong></div>
-              <div><span>命中</span><strong>{{ teamTotals.makes }}</strong></div>
+              <div><span>命中</span><strong>{{ teamTotals.makes }}<small v-if="teamCandidateEvents.filter((event) => event.type === 'make').length"> +{{ teamCandidateEvents.filter((event) => event.type === 'make').length }}待确认</small></strong></div>
               <div><span>得分</span><strong>{{ teamTotals.points }}</strong></div>
             </div>
 
             <div class="panel-header team-highlight-header">
               <div><div class="panel-kicker">{{ selectedTeam?.name || '当前球队' }}</div><h2>进球集锦 <span>/ CONFIRMED MAKES</span></h2></div>
-              <span class="highlight-count">{{ teamHighlights.length }} 个片段</span>
+              <span class="highlight-count">{{ teamHighlights.length }} 个片段<small v-if="teamCandidateEvents.length"> · {{ teamCandidateEvents.length }} 待确认</small></span>
             </div>
             <div v-if="teamHighlights.length" class="team-highlight-grid">
               <button v-for="event in teamHighlights" :key="event.id" class="team-highlight-card" type="button" @click="selectHighlight(event)">
@@ -549,7 +583,7 @@ onBeforeUnmount(stopPolling)
                 </span>
                 <span class="team-highlight-copy">
                   <strong>{{ playerName(event.playerId) }}</strong>
-                  <small>{{ event.points ?? 0 }} 分 · {{ clips.find((clip) => clip.id === event.clipId)?.name || '源片段' }}</small>
+                  <small>{{ event.status === 'confirmed' ? `${event.points ?? 0} 分` : 'AI 待确认' }} · {{ clips.find((clip) => clip.id === event.clipId)?.name || '源片段' }}</small>
                 </span>
                 <ChevronRight :size="16" />
               </button>
@@ -671,8 +705,10 @@ onBeforeUnmount(stopPolling)
         <div class="form-grid">
           <label><span>比赛名称 *</span><input v-model="createDraft.name" /></label><label><span>比赛日期</span><input v-model="createDraft.playedAt" type="datetime-local" /></label>
           <label><span>比赛场地</span><input v-model="createDraft.venue" /></label><span></span>
-          <label><span>主队名称 *</span><input v-model="createDraft.homeName" /></label><label><span>主队球衣颜色 *</span><input v-model="createDraft.homeColor" type="color" /></label>
-          <label><span>客队名称 *</span><input v-model="createDraft.awayName" /></label><label><span>客队球衣颜色 *</span><input v-model="createDraft.awayColor" type="color" /></label>
+          <label><span>主队名称 *</span><input v-model="createDraft.homeName" /></label>
+          <div class="jersey-color-field"><span>主队球衣颜色 *</span><div class="jersey-palette"><button v-for="color in jerseyColors" :key="`home-${color.value}`" class="jersey-swatch" :class="{ selected: createDraft.homeColor.toUpperCase() === color.value }" type="button" :title="color.name" :style="{ background: color.value }" @click="selectJerseyColor('home', color.value)"><Check v-if="createDraft.homeColor.toUpperCase() === color.value" :size="13" /></button><label class="custom-color-swatch" title="自定义颜色"><input v-model="createDraft.homeColor" type="color" /><Plus :size="13" /></label></div><small>{{ createDraft.homeColor }}</small></div>
+          <label><span>客队名称 *</span><input v-model="createDraft.awayName" /></label>
+          <div class="jersey-color-field"><span>客队球衣颜色 *</span><div class="jersey-palette"><button v-for="color in jerseyColors" :key="`away-${color.value}`" class="jersey-swatch" :class="{ selected: createDraft.awayColor.toUpperCase() === color.value }" type="button" :title="color.name" :style="{ background: color.value }" @click="selectJerseyColor('away', color.value)"><Check v-if="createDraft.awayColor.toUpperCase() === color.value" :size="13" /></button><label class="custom-color-swatch" title="自定义颜色"><input v-model="createDraft.awayColor" type="color" /><Plus :size="13" /></label></div><small>{{ createDraft.awayColor }}</small></div>
         </div>
         <div class="modal-footer"><span>球队颜色用于后续身份辅助判断</span><button class="button button-acid" type="button" :disabled="busy" @click="createMatch"><Check :size="16" /> 创建并进入</button></div>
       </section>

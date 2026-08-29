@@ -493,6 +493,26 @@ def sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
+def color_distance(rgb: tuple[float, float, float] | None, hex_color: str | None) -> float:
+    if rgb is None or not hex_color or not hex_color.startswith("#") or len(hex_color) != 7:
+        return 999.0
+    try:
+        target = tuple(int(hex_color[index:index + 2], 16) for index in (1, 3, 5))
+        return sum((rgb[index] - target[index]) ** 2 for index in range(3)) ** 0.5 / 441.7
+    except ValueError:
+        return 999.0
+
+
+def infer_team_id(c: sqlite3.Connection, match_id: str, rgb: tuple[float, float, float] | None) -> str | None:
+    teams = c.execute("SELECT id,color FROM teams WHERE match_id=? AND color IS NOT NULL", (match_id,)).fetchall()
+    if not rgb or len(teams) < 2:
+        return None
+    ranked = sorted((color_distance(rgb, team["color"]), team["id"]) for team in teams)
+    if ranked[0][0] < 0.7 and ranked[1][0] - ranked[0][0] >= 0.08:
+        return ranked[0][1]
+    return None
+
+
 async def run_analysis(run_id: str, match_id: str, clip_ids: list[str], device: str) -> None:
     errors: dict[str, str] = {}
     try:
@@ -511,25 +531,30 @@ async def run_analysis(run_id: str, match_id: str, clip_ids: list[str], device: 
                 track_players = {}
                 for track in inspection.tracks:
                     code = f"tmp-{clip_id[:8]}-{track.local_track_key}"
+                    team_id = infer_team_id(c, match_id, track.jersey_rgb)
                     player_id = c.execute("SELECT id FROM players WHERE match_id=? AND code=?", (match_id, code)).fetchone()
                     if not player_id:
                         player_id = {"id": uuid.uuid4().hex}
-                        c.execute("INSERT INTO players(id,match_id,code,name,identity_type,status,confidence) VALUES(?,?,?,?,?,?,?)", (player_id["id"], match_id, code, "", "temporary", "unconfirmed", track.confidence))
+                        c.execute("INSERT INTO players(id,match_id,team_id,code,name,identity_type,status,confidence) VALUES(?,?,?,?,?,?,?,?)", (player_id["id"], match_id, team_id, code, "", "temporary", "unconfirmed", track.confidence))
                     else: player_id = dict(player_id)
+                    if team_id:
+                        c.execute("UPDATE players SET team_id=? WHERE id=? AND (team_id IS NULL OR status='unconfirmed')", (team_id, player_id["id"]))
                     track_players[track.local_track_key] = player_id["id"]
                     c.execute("INSERT OR REPLACE INTO player_tracks(id,clip_id,player_id,local_track_key,confidence) VALUES(?,?,?,?,?)", (uuid.uuid4().hex,clip_id,player_id["id"],track.local_track_key,track.confidence))
                 for candidate in inspection.events:
                     event_type = {"投篮": "attempt", "命中": "make"}.get(candidate.event_type, candidate.event_type)
                     fingerprint = f"{clip_id}/{event_type}/{int(candidate.seconds/0.2)}/{candidate.source}"
                     existing = c.execute("SELECT id,status,shot_type_source FROM analysis_events WHERE fingerprint=?", (fingerprint,)).fetchone()
+                    event_team_id = c.execute("SELECT team_id FROM players WHERE id=?", (track_players.get(candidate.local_track_key),)).fetchone() if candidate.local_track_key else None
+                    inferred_team_id = event_team_id["team_id"] if event_team_id else None
                     if existing and existing["status"] in {"confirmed", "ignored"}: continue
                     if existing:
                         if existing["shot_type_source"] == "manual":
-                            c.execute("UPDATE analysis_events SET event_type=?,seconds=?,confidence=?,description=?,source=?,run_id=?,local_track_key=?,player_id=?,updated_at=? WHERE id=?", (event_type,candidate.seconds,candidate.confidence,candidate.description,candidate.source,run_id,candidate.local_track_key,track_players.get(candidate.local_track_key),now(),existing["id"]))
+                            c.execute("UPDATE analysis_events SET event_type=?,seconds=?,confidence=?,description=?,source=?,run_id=?,local_track_key=?,player_id=?,team_id=?,updated_at=? WHERE id=?", (event_type,candidate.seconds,candidate.confidence,candidate.description,candidate.source,run_id,candidate.local_track_key,track_players.get(candidate.local_track_key),inferred_team_id,now(),existing["id"]))
                         else:
-                            c.execute("UPDATE analysis_events SET event_type=?,seconds=?,confidence=?,description=?,source=?,run_id=?,local_track_key=?,player_id=?,shot_type=?,shot_type_confidence=?,shot_type_source=?,court_x=?,court_y=?,homography_confidence=?,release_frame=?,updated_at=? WHERE id=?", (event_type,candidate.seconds,candidate.confidence,candidate.description,candidate.source,run_id,candidate.local_track_key,track_players.get(candidate.local_track_key),candidate.shot_type,candidate.shot_type_confidence,candidate.shot_type_source,candidate.court_x,candidate.court_y,candidate.homography_confidence,candidate.release_frame,now(),existing["id"]))
+                            c.execute("UPDATE analysis_events SET event_type=?,seconds=?,confidence=?,description=?,source=?,run_id=?,local_track_key=?,player_id=?,team_id=?,shot_type=?,shot_type_confidence=?,shot_type_source=?,court_x=?,court_y=?,homography_confidence=?,release_frame=?,updated_at=? WHERE id=?", (event_type,candidate.seconds,candidate.confidence,candidate.description,candidate.source,run_id,candidate.local_track_key,track_players.get(candidate.local_track_key),inferred_team_id,candidate.shot_type,candidate.shot_type_confidence,candidate.shot_type_source,candidate.court_x,candidate.court_y,candidate.homography_confidence,candidate.release_frame,now(),existing["id"]))
                     else:
-                        c.execute("INSERT INTO analysis_events(id,clip_id,event_type,seconds,confidence,status,description,source,run_id,fingerprint,local_track_key,player_id,shot_type,shot_type_confidence,shot_type_source,court_x,court_y,homography_confidence,release_frame,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", (f"ai-{uuid.uuid4().hex}",clip_id,event_type,candidate.seconds,candidate.confidence,"pending",candidate.description,candidate.source,run_id,fingerprint,candidate.local_track_key,track_players.get(candidate.local_track_key),candidate.shot_type,candidate.shot_type_confidence,candidate.shot_type_source,candidate.court_x,candidate.court_y,candidate.homography_confidence,candidate.release_frame,now()))
+                        c.execute("INSERT INTO analysis_events(id,clip_id,event_type,seconds,confidence,status,description,source,run_id,fingerprint,local_track_key,player_id,team_id,shot_type,shot_type_confidence,shot_type_source,court_x,court_y,homography_confidence,release_frame,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", (f"ai-{uuid.uuid4().hex}",clip_id,event_type,candidate.seconds,candidate.confidence,"pending",candidate.description,candidate.source,run_id,fingerprint,candidate.local_track_key,track_players.get(candidate.local_track_key),inferred_team_id,candidate.shot_type,candidate.shot_type_confidence,candidate.shot_type_source,candidate.court_x,candidate.court_y,candidate.homography_confidence,candidate.release_frame,now()))
                 c.execute("UPDATE analysis_runs SET progress=?,completed_clips=? WHERE id=?", (round(index / max(len(clip_ids), 1) * 100, 1), index, run_id))
         with db() as c:
             c.execute("UPDATE analysis_runs SET status=?,progress=100,error=?,details_json=?,finished_at=? WHERE id=?", ("failed" if errors else "completed", "; ".join(errors.values()), json.dumps({"errors": errors}), now(), run_id))

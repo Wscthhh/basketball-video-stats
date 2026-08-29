@@ -37,6 +37,7 @@ class TrackCandidate:
     local_track_key: str
     confidence: float
     detections: int
+    jersey_rgb: tuple[float, float, float] | None = None
 
 
 @dataclass
@@ -136,7 +137,7 @@ class BasketballAnalyzer:
 
             players, hoops = self._collect_detections(player_results, {"player"}, {"hoop"})
             balls, _ = self._collect_detections(ball_results, {"ball", "basketball", "sports ball"}, set(), best_per_frame=True)
-            tracks, tracked_players = self._track_players(players)
+            tracks, tracked_players = self._track_players(players, frames)
             events = self._detect_shot_events(balls, hoops, tracked_players)
             court_keypoints = 0
             if events and self.models["court"].ready:
@@ -342,7 +343,7 @@ class BasketballAnalyzer:
         area_right = (right["x2"] - right["x1"]) * (right["y2"] - right["y1"])
         return intersection / max(area_left + area_right - intersection, 1e-6)
 
-    def _track_players(self, detections: list[dict[str, float]]) -> tuple[list[TrackCandidate], list[dict[str, float]]]:
+    def _track_players(self, detections: list[dict[str, float]], frames: list[Path]) -> tuple[list[TrackCandidate], list[dict[str, float]]]:
         try:
             import numpy as np
             import supervision as sv  # type: ignore
@@ -360,6 +361,7 @@ class BasketballAnalyzer:
 
             tracked_players: list[dict[str, float]] = []
             aggregates: dict[str, dict[str, float]] = {}
+            colors: dict[str, list[float]] = {}
             for frame_index in range(max(by_frame, default=-1) + 1):
                 frame_detections = by_frame.get(frame_index, [])
                 if frame_detections:
@@ -383,8 +385,15 @@ class BasketballAnalyzer:
                     aggregate = aggregates.setdefault(key, {"count": 0, "confidence": 0})
                     aggregate["count"] += 1
                     aggregate["confidence"] += float(confidence)
+                    color = self._sample_jersey_color(frames[frame_index], item)
+                    if color:
+                        current_color = colors.setdefault(key, [0.0, 0.0, 0.0, 0.0])
+                        current_color[0] += color[0]
+                        current_color[1] += color[1]
+                        current_color[2] += color[2]
+                        current_color[3] += 1
             tracks = [
-                TrackCandidate(key, value["confidence"] / value["count"], int(value["count"]))
+                TrackCandidate(key, value["confidence"] / value["count"], int(value["count"]), self._average_color(colors.get(key)))
                 for key, value in aggregates.items() if value["count"] >= 2
             ]
             valid_keys = {track.local_track_key for track in tracks}
@@ -406,6 +415,36 @@ class BasketballAnalyzer:
         stable = [TrackCandidate(t["key"], t["confidence"] / max(t["count"], 1), t["count"]) for t in tracks if t["count"] >= 2]
         valid_keys = {track.local_track_key for track in stable}
         return stable, [item for item in detections if item.get("local_track_key") in valid_keys]
+
+    @staticmethod
+    def _sample_jersey_color(frame_path: Path, detection: dict[str, float]) -> tuple[float, float, float] | None:
+        try:
+            import cv2
+            image = cv2.imread(str(frame_path))
+            if image is None:
+                return None
+            x1, y1, x2, y2 = (int(detection[key]) for key in ("x1", "y1", "x2", "y2"))
+            width, height = x2 - x1, y2 - y1
+            if width < 8 or height < 12:
+                return None
+            top = image[y1 + int(height * 0.2): y1 + int(height * 0.68), x1 + int(width * 0.2): x2 - int(width * 0.2)]
+            if top.size == 0:
+                return None
+            hsv = cv2.cvtColor(top, cv2.COLOR_BGR2HSV)
+            mask = (hsv[:, :, 1] > 25) & (hsv[:, :, 2] > 35)
+            pixels = top[mask]
+            if len(pixels) < 10:
+                pixels = top.reshape(-1, 3)
+            bgr = pixels.mean(axis=0)
+            return float(bgr[2]), float(bgr[1]), float(bgr[0])
+        except Exception:
+            return None
+
+    @staticmethod
+    def _average_color(value: list[float] | None) -> tuple[float, float, float] | None:
+        if not value or value[3] == 0:
+            return None
+        return tuple(channel / value[3] for channel in value[:3])
 
     @staticmethod
     def _nearest_player(ball: dict[str, float], players: list[dict[str, float]]) -> str | None:
