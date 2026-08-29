@@ -82,6 +82,25 @@ class ApiTest(unittest.TestCase):
         invalid = self.client.post(f"/api/matches/{match_id}/analyze", json={"clipIds": ["missing"], "device": "cpu"})
         self.assertEqual(invalid.status_code, 422)
 
+    def test_cleanup_preserves_fixture_and_revised_confirmation(self) -> None:
+        match_id = self.client.post("/api/matches", json={"name": "Cleanup", "homeTeam": {"name": "A"}, "awayTeam": {"name": "B"}}).json()["id"]
+        with main.db() as c:
+            c.execute("INSERT INTO clips VALUES(?,?,?,?,?,?,?,?,?,?)", ("cleanup-clip", match_id, "x.mp4", "x.mp4", "cleanup-hash", 1, 10, "review", 1, main.now()))
+            c.execute("INSERT INTO players(id,match_id,code,identity_type,status) VALUES(?,?,?,?,?)", ("temporary-player", match_id, "tmp", "temporary", "unconfirmed"))
+            c.execute("INSERT INTO players(id,match_id,code,identity_type,status) VALUES(?,?,?,?,?)", ("manual-player", match_id, "manual", "manual", "confirmed"))
+            for event_id, player_id, source, status in (("auto-event", "temporary-player", "ai", "pending"), ("fixture-event", "manual-player", "test-fixture", "confirmed")):
+                c.execute("INSERT INTO analysis_events(id,clip_id,event_type,seconds,confidence,status,player_id,source) VALUES(?,?,?,?,?,?,?,?)", (event_id, "cleanup-clip", "attempt", 1, .5, status, player_id, source))
+            c.execute("INSERT INTO event_revisions VALUES(?,?,?,?,?)", ("revision", "auto-event", "pending", "{}", main.now()))
+            c.execute("INSERT INTO player_tracks(id,clip_id,player_id,local_track_key) VALUES(?,?,?,?)", ("track", "cleanup-clip", "temporary-player", "local-1"))
+            c.execute("INSERT INTO analysis_runs(id,match_id,status,device,created_at) VALUES(?,?,?,?,?)", ("cleanup-run", match_id, "completed", "cpu", main.now()))
+        result = self.client.post(f"/api/matches/{match_id}/cleanup-analysis")
+        self.assertEqual(result.status_code, 200)
+        self.assertEqual(result.json()["events"], 1)
+        with main.db() as c:
+            self.assertIsNotNone(c.execute("SELECT id FROM analysis_events WHERE id='fixture-event'").fetchone())
+            self.assertIsNone(c.execute("SELECT id FROM players WHERE id='temporary-player'").fetchone())
+            self.assertIsNotNone(c.execute("SELECT id FROM players WHERE id='manual-player'").fetchone())
+
 
 if __name__ == "__main__":
     unittest.main()

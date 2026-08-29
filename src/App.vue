@@ -222,6 +222,20 @@ async function analyze(clipIds = clips.value.filter((clip) => ['queued', 'failed
   }
 }
 
+async function reanalyzeAll() {
+  if (!match.value || !clips.value.length || busy.value) return
+  busy.value = true
+  try {
+    const run = await api.analyze(match.value.id, clips.value.map((clip) => clip.id))
+    if (workspace.value) workspace.value.runs = [run, ...workspace.value.runs.filter((item) => item.id !== run.id)]
+    startPolling(run.id)
+  } catch (error) {
+    fail(error)
+  } finally {
+    busy.value = false
+  }
+}
+
 function stopPolling() {
   if (pollTimer.value) window.clearTimeout(pollTimer.value)
   pollTimer.value = undefined
@@ -536,7 +550,7 @@ onBeforeUnmount(stopPolling)
               <h1>{{ match.homeTeam.name }} <span>vs</span> {{ match.awayTeam.name }}</h1>
               <p>{{ match.playedAt || '未填写比赛日期' }}<b v-if="match.venue"> · </b>{{ match.venue }}</p>
             </div>
-            <button class="button button-acid" type="button" @click="showImport = true"><CloudUpload :size="17" /> 导入片段</button>
+            <div class="heading-actions"><button class="button button-quiet" type="button" :disabled="busy || Boolean(pollingRunId) || !clips.length" @click="reanalyzeAll"><RefreshCw :size="16" /> {{ pollingRunId ? '重新分析中' : '重新分析全部' }}</button><button class="button button-acid" type="button" @click="showImport = true"><CloudUpload :size="17" /> 导入片段</button></div>
           </section>
 
           <section class="metric-strip">
@@ -680,7 +694,7 @@ onBeforeUnmount(stopPolling)
           </section>
 
           <section v-if="tab === 'clips'" class="tool-panel library-panel">
-            <div class="panel-header"><div><div class="panel-kicker">素材管理</div><h2>片段库</h2></div><button class="button button-acid" type="button" @click="showImport = true"><Upload :size="16" /> 导入片段</button></div>
+            <div class="panel-header"><div><div class="panel-kicker">素材管理</div><h2>片段库</h2></div><div class="panel-actions"><button class="button button-quiet compact" type="button" :disabled="busy || Boolean(pollingRunId) || !clips.length" @click="reanalyzeAll"><RefreshCw :size="15" /> {{ pollingRunId ? '重新分析中' : '重新分析全部' }}</button><button class="button button-acid" type="button" @click="showImport = true"><Upload :size="16" /> 导入片段</button></div></div>
             <div class="library-toolbar">
               <label class="search-field"><Search :size="16" /><input v-model="search" placeholder="搜索文件名" /></label>
               <div class="filter-pills"><button v-for="item in [{ value: 'all', label: '全部' }, { value: 'queued', label: '排队中' }, { value: 'review', label: '待复核' }, { value: 'failed', label: '失败' }]" :key="item.value" :class="{ active: filter === item.value }" type="button" @click="filter = item.value">{{ item.label }}</button></div>

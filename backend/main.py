@@ -48,7 +48,7 @@ def init_db() -> None:
         CREATE TABLE IF NOT EXISTS analysis_events (id TEXT PRIMARY KEY, clip_id TEXT NOT NULL, event_type TEXT NOT NULL, seconds REAL NOT NULL, confidence REAL NOT NULL, status TEXT NOT NULL DEFAULT 'pending', player_id TEXT, description TEXT NOT NULL DEFAULT '', source TEXT NOT NULL DEFAULT '', FOREIGN KEY(clip_id) REFERENCES clips(id));
         CREATE TABLE IF NOT EXISTS matches (id TEXT PRIMARY KEY, name TEXT NOT NULL, played_at TEXT, venue TEXT, status TEXT NOT NULL DEFAULT 'draft', is_test INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS teams (id TEXT PRIMARY KEY, match_id TEXT NOT NULL, side TEXT NOT NULL, name TEXT NOT NULL DEFAULT '', color TEXT, UNIQUE(match_id, side), FOREIGN KEY(match_id) REFERENCES matches(id));
-        CREATE TABLE IF NOT EXISTS players (id TEXT PRIMARY KEY, match_id TEXT NOT NULL, team_id TEXT, code TEXT NOT NULL, name TEXT NOT NULL DEFAULT '', number TEXT, identity_type TEXT NOT NULL DEFAULT 'temporary', status TEXT NOT NULL DEFAULT 'unconfirmed', confidence REAL NOT NULL DEFAULT 0, UNIQUE(match_id, code), FOREIGN KEY(match_id) REFERENCES matches(id));
+        CREATE TABLE IF NOT EXISTS players (id TEXT PRIMARY KEY, match_id TEXT NOT NULL, team_id TEXT, code TEXT NOT NULL, name TEXT NOT NULL DEFAULT '', number TEXT, identity_type TEXT NOT NULL DEFAULT 'temporary', status TEXT NOT NULL DEFAULT 'unconfirmed', confidence REAL NOT NULL DEFAULT 0, appearance_r REAL, appearance_g REAL, appearance_b REAL, appearance_samples INTEGER NOT NULL DEFAULT 0, track_count_total INTEGER NOT NULL DEFAULT 0, UNIQUE(match_id, code), FOREIGN KEY(match_id) REFERENCES matches(id));
         CREATE TABLE IF NOT EXISTS player_tracks (id TEXT PRIMARY KEY, clip_id TEXT NOT NULL, player_id TEXT NOT NULL, local_track_key TEXT NOT NULL, team_id TEXT, confidence REAL NOT NULL DEFAULT 0, UNIQUE(clip_id, local_track_key), FOREIGN KEY(clip_id) REFERENCES clips(id), FOREIGN KEY(player_id) REFERENCES players(id));
         CREATE TABLE IF NOT EXISTS analysis_runs (id TEXT PRIMARY KEY, match_id TEXT NOT NULL, status TEXT NOT NULL, progress REAL NOT NULL DEFAULT 0, device TEXT NOT NULL, error TEXT NOT NULL DEFAULT '', started_at TEXT, finished_at TEXT, created_at TEXT NOT NULL, version TEXT NOT NULL DEFAULT '1', FOREIGN KEY(match_id) REFERENCES matches(id));
         CREATE TABLE IF NOT EXISTS event_revisions (id TEXT PRIMARY KEY, event_id TEXT NOT NULL, status TEXT NOT NULL, payload TEXT NOT NULL, created_at TEXT NOT NULL, FOREIGN KEY(event_id) REFERENCES analysis_events(id));
@@ -63,6 +63,10 @@ def init_db() -> None:
         }.items():
             if name not in {r["name"] for r in c.execute("PRAGMA table_info(analysis_events)")}:
                 c.execute(f"ALTER TABLE analysis_events ADD COLUMN {name} {definition}")
+        player_columns = {r["name"] for r in c.execute("PRAGMA table_info(players)")}
+        for name, definition in {"appearance_r": "REAL", "appearance_g": "REAL", "appearance_b": "REAL", "appearance_samples": "INTEGER NOT NULL DEFAULT 0", "track_count_total": "INTEGER NOT NULL DEFAULT 0"}.items():
+            if name not in player_columns:
+                c.execute(f"ALTER TABLE players ADD COLUMN {name} {definition}")
         duplicate_fingerprints = c.execute(
             "SELECT fingerprint FROM analysis_events WHERE fingerprint IS NOT NULL GROUP BY fingerprint HAVING COUNT(*)>1"
         ).fetchall()
@@ -503,6 +507,62 @@ def color_distance(rgb: tuple[float, float, float] | None, hex_color: str | None
         return 999.0
 
 
+def appearance_distance(rgb: tuple[float, float, float] | None, row: sqlite3.Row | dict[str, Any]) -> float:
+    samples = row["appearance_samples"] or 0
+    values = (row["appearance_r"], row["appearance_g"], row["appearance_b"])
+    if rgb is None or samples == 0 or any(value is None for value in values):
+        return 999.0
+    return sum((rgb[i] - values[i]) ** 2 for i in range(3)) ** 0.5 / 441.7
+
+
+def match_track_candidate(track: Any, players: list[sqlite3.Row | dict[str, Any]], team_id: str | None = None) -> sqlite3.Row | dict[str, Any] | None:
+    """Match one clip-local track to the best temporary identity for this match."""
+    ranked = []
+    for player in players:
+        player_team = player["team_id"]
+        same_team = bool(team_id and player_team == team_id)
+        if team_id and player_team and not same_team:
+            continue
+        distance = appearance_distance(track.jersey_rgb, player)
+        has_color = distance < 999
+        if not has_color and (not same_team or track.confidence < 0.75 or track.detections < 5):
+            continue
+        threshold = 0.30 if same_team else (0.20 if has_color else 0.12)
+        if not has_color:
+            threshold = 0.12
+        if distance > threshold:
+            continue
+        score = (distance if has_color else 0.4) - (0.035 * min(track.confidence, 1.0)) - (0.01 * min(track.detections, 20) / 20)
+        if same_team:
+            score -= 0.12
+        ranked.append((score, player))
+    return min(ranked, key=lambda item: item[0])[1] if ranked else None
+
+
+def cleanup_match_analysis(match_id: str) -> dict[str, int]:
+    """Remove AI output while preserving clips, match setup, and manual fixtures."""
+    with db() as c:
+        require_match(match_id, c)
+        event_rows = c.execute(
+            "SELECT e.id,e.status FROM analysis_events e JOIN clips cl ON cl.id=e.clip_id "
+            "WHERE cl.match_id=? AND (e.source IS NULL OR e.source NOT IN ('manual','test-fixture'))", (match_id,)
+        ).fetchall()
+        protected = {row["id"] for row in event_rows if row["status"] == "confirmed" and c.execute("SELECT 1 FROM event_revisions WHERE event_id=? LIMIT 1", (row["id"],)).fetchone()}
+        removable = [row["id"] for row in event_rows if row["id"] not in protected]
+        if removable:
+            marks = ",".join("?" for _ in removable)
+            c.execute(f"DELETE FROM event_revisions WHERE event_id IN ({marks})", removable)
+            c.execute(f"DELETE FROM analysis_events WHERE id IN ({marks})", removable)
+        track_rows = c.execute("SELECT pt.id FROM player_tracks pt JOIN clips cl ON cl.id=pt.clip_id WHERE cl.match_id=? AND cl.status IS NOT NULL", (match_id,)).fetchall()
+        c.execute("DELETE FROM player_tracks WHERE clip_id IN (SELECT id FROM clips WHERE match_id=?)", (match_id,))
+        player_rows = c.execute("SELECT id FROM players WHERE match_id=? AND identity_type IN ('temporary','unconfirmed')", (match_id,)).fetchall()
+        if player_rows:
+            marks = ",".join("?" for _ in player_rows)
+            c.execute(f"DELETE FROM players WHERE id IN ({marks})", [row["id"] for row in player_rows])
+        runs = c.execute("SELECT COUNT(*) FROM analysis_runs WHERE match_id=?", (match_id,)).fetchone()[0]
+        c.execute("DELETE FROM analysis_runs WHERE match_id=?", (match_id,))
+        c.execute("UPDATE clips SET status='queued',confidence=0 WHERE match_id=?", (match_id,))
+        return {"events": len(removable), "protectedEvents": len(protected), "tracks": len(track_rows), "players": len(player_rows), "runs": runs}
 def infer_team_id(c: sqlite3.Connection, match_id: str, rgb: tuple[float, float, float] | None) -> str | None:
     teams = c.execute("SELECT id,color FROM teams WHERE match_id=? AND color IS NOT NULL", (match_id,)).fetchall()
     if not rgb or len(teams) < 2:
@@ -529,18 +589,29 @@ async def run_analysis(run_id: str, match_id: str, clip_ids: list[str], device: 
             with db() as c:
                 c.execute("UPDATE clips SET status='review',confidence=? WHERE id=?", (max((e.confidence for e in inspection.events), default=0), clip_id))
                 track_players = {}
+                existing_players = c.execute("SELECT * FROM players WHERE match_id=? AND identity_type IN ('temporary','unconfirmed')", (match_id,)).fetchall()
+                used_player_ids: set[str] = set()
                 for track in inspection.tracks:
-                    code = f"tmp-{clip_id[:8]}-{track.local_track_key}"
                     team_id = infer_team_id(c, match_id, track.jersey_rgb)
-                    player_id = c.execute("SELECT id FROM players WHERE match_id=? AND code=?", (match_id, code)).fetchone()
-                    if not player_id:
-                        player_id = {"id": uuid.uuid4().hex}
-                        c.execute("INSERT INTO players(id,match_id,team_id,code,name,identity_type,status,confidence) VALUES(?,?,?,?,?,?,?,?)", (player_id["id"], match_id, team_id, code, "", "temporary", "unconfirmed", track.confidence))
-                    else: player_id = dict(player_id)
-                    if team_id:
-                        c.execute("UPDATE players SET team_id=? WHERE id=? AND (team_id IS NULL OR status='unconfirmed')", (team_id, player_id["id"]))
-                    track_players[track.local_track_key] = player_id["id"]
-                    c.execute("INSERT OR REPLACE INTO player_tracks(id,clip_id,player_id,local_track_key,confidence) VALUES(?,?,?,?,?)", (uuid.uuid4().hex,clip_id,player_id["id"],track.local_track_key,track.confidence))
+                    player = match_track_candidate(track, [item for item in existing_players if item["id"] not in used_player_ids], team_id)
+                    if player is None:
+                        player = {"id": uuid.uuid4().hex, "team_id": team_id}
+                        c.execute("INSERT INTO players(id,match_id,team_id,code,name,identity_type,status,confidence,appearance_r,appearance_g,appearance_b,appearance_samples,track_count_total) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)", (player["id"], match_id, team_id, f"tmp-{uuid.uuid4().hex[:12]}", "", "temporary", "unconfirmed", track.confidence, None, None, None, 0, 0))
+                        existing_players.append(c.execute("SELECT * FROM players WHERE id=?", (player["id"],)).fetchone())
+                    player_id = player["id"]
+                    used_player_ids.add(player_id)
+                    old = c.execute("SELECT * FROM players WHERE id=?", (player_id,)).fetchone()
+                    rgb = track.jersey_rgb
+                    samples = old["appearance_samples"] or 0
+                    if rgb:
+                        total = samples + 1
+                        appearance = tuple(((old[f"appearance_{channel}"] or 0) * samples + rgb[index]) / total for index, channel in enumerate(("r", "g", "b")))
+                        c.execute("UPDATE players SET appearance_r=?,appearance_g=?,appearance_b=?,appearance_samples=?,confidence=MAX(confidence,?),track_count_total=track_count_total+?,team_id=COALESCE(team_id,?) WHERE id=?", (*appearance, total, track.confidence, track.detections, team_id, player_id))
+                    else:
+                        c.execute("UPDATE players SET confidence=MAX(confidence,?),track_count_total=track_count_total+?,team_id=COALESCE(team_id,?) WHERE id=?", (track.confidence, track.detections, team_id, player_id))
+                    track_players[track.local_track_key] = player_id
+                    prior_track = c.execute("SELECT id FROM player_tracks WHERE clip_id=? AND local_track_key=?", (clip_id, track.local_track_key)).fetchone()
+                    c.execute("INSERT OR REPLACE INTO player_tracks(id,clip_id,player_id,local_track_key,team_id,confidence) VALUES(?,?,?,?,?,?)", (prior_track["id"] if prior_track else uuid.uuid4().hex, clip_id, player_id, track.local_track_key, team_id, track.confidence))
                 for candidate in inspection.events:
                     event_type = {"投篮": "attempt", "命中": "make"}.get(candidate.event_type, candidate.event_type)
                     fingerprint = f"{clip_id}/{event_type}/{int(candidate.seconds/0.2)}/{candidate.source}"
@@ -598,3 +669,8 @@ async def task_status(task_id: str) -> dict[str, Any]:
         if not row: raise HTTPException(404, "analysis task not found")
         result = run_payload(row)
         return result
+
+
+@app.post("/api/matches/{match_id}/cleanup-analysis")
+async def cleanup_analysis(match_id: str) -> dict[str, Any]:
+    return cleanup_match_analysis(match_id)

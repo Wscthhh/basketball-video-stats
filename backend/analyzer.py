@@ -38,6 +38,8 @@ class TrackCandidate:
     confidence: float
     detections: int
     jersey_rgb: tuple[float, float, float] | None = None
+    bbox_aspect: float | None = None
+    median_height: float | None = None
 
 
 @dataclass
@@ -247,6 +249,8 @@ class BasketballAnalyzer:
         release_ball = balls[max(0, apex_index - 2)]
         release_frame = int(release_ball["frame"])
         shooter = self._nearest_player(release_ball, players)
+        if not shooter:
+            return []
         events = [
             AnalysisResult(
                 "投篮",
@@ -353,14 +357,14 @@ class BasketballAnalyzer:
                 lost_track_buffer=12,
                 minimum_matching_threshold=0.72,
                 frame_rate=SAMPLE_FPS,
-                minimum_consecutive_frames=2,
+                minimum_consecutive_frames=3,
             )
             by_frame: dict[int, list[dict[str, float]]] = {}
             for detection in detections:
                 by_frame.setdefault(int(detection["frame"]), []).append(detection)
 
             tracked_players: list[dict[str, float]] = []
-            aggregates: dict[str, dict[str, float]] = {}
+            aggregates: dict[str, dict[str, Any]] = {}
             colors: dict[str, list[float]] = {}
             for frame_index in range(max(by_frame, default=-1) + 1):
                 frame_detections = by_frame.get(frame_index, [])
@@ -385,6 +389,8 @@ class BasketballAnalyzer:
                     aggregate = aggregates.setdefault(key, {"count": 0, "confidence": 0})
                     aggregate["count"] += 1
                     aggregate["confidence"] += float(confidence)
+                    aggregate.setdefault("heights", []).append(max(1.0, y2 - y1))
+                    aggregate.setdefault("aspects", []).append(max(0.01, (x2 - x1) / max(1.0, y2 - y1)))
                     color = self._sample_jersey_color(frames[frame_index], item)
                     if color:
                         current_color = colors.setdefault(key, [0.0, 0.0, 0.0, 0.0])
@@ -393,8 +399,9 @@ class BasketballAnalyzer:
                         current_color[2] += color[2]
                         current_color[3] += 1
             tracks = [
-                TrackCandidate(key, value["confidence"] / value["count"], int(value["count"]), self._average_color(colors.get(key)))
-                for key, value in aggregates.items() if value["count"] >= 2
+                TrackCandidate(key, value["confidence"] / value["count"], int(value["count"]), self._average_color(colors.get(key)),
+                               sum(value["aspects"]) / len(value["aspects"]), self._median(value["heights"]))
+                for key, value in aggregates.items() if value["count"] >= 3
             ]
             valid_keys = {track.local_track_key for track in tracks}
             return tracks, [item for item in tracked_players if item["local_track_key"] in valid_keys]
@@ -412,7 +419,7 @@ class BasketballAnalyzer:
             track["last"], track["frame"] = detection, detection["frame"]
             track["count"] += 1; track["confidence"] += detection["confidence"]
             detection["local_track_key"] = track["key"]
-        stable = [TrackCandidate(t["key"], t["confidence"] / max(t["count"], 1), t["count"]) for t in tracks if t["count"] >= 2]
+        stable = [TrackCandidate(t["key"], t["confidence"] / max(t["count"], 1), t["count"]) for t in tracks if t["count"] >= 3]
         valid_keys = {track.local_track_key for track in stable}
         return stable, [item for item in detections if item.get("local_track_key") in valid_keys]
 
@@ -445,6 +452,10 @@ class BasketballAnalyzer:
         if not value or value[3] == 0:
             return None
         return tuple(channel / value[3] for channel in value[:3])
+
+    @staticmethod
+    def _median(values: list[float]) -> float | None:
+        return sorted(values)[len(values) // 2] if values else None
 
     @staticmethod
     def _nearest_player(ball: dict[str, float], players: list[dict[str, float]]) -> str | None:
