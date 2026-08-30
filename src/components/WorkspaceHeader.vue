@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { CloudUpload, RefreshCw } from 'lucide-vue-next'
 import type { Match } from '../types'
+import TeamColorSwatch from './TeamColorSwatch.vue'
 
 defineProps<{
   match: Match
@@ -19,7 +20,7 @@ defineEmits<{ reanalyze: []; importClips: [] }>()
   <section class="page-heading">
     <div>
       <div class="eyebrow"><span class="eyebrow-line"></span><em v-if="match.isTest" class="test-tag">TEST</em>{{ match.name }}</div>
-      <h1>{{ match.homeTeam.name }} <span>vs</span> {{ match.awayTeam.name }}</h1>
+       <h1><span class="team-heading"><TeamColorSwatch :color="match.homeTeam.color" size="medium" />{{ match.homeTeam.name }}</span> <span>vs</span> <span class="team-heading"><TeamColorSwatch :color="match.awayTeam.color" size="medium" />{{ match.awayTeam.name }}</span></h1>
       <p>{{ match.playedAt || '未填写比赛日期' }}<b v-if="match.venue"> · </b>{{ match.venue }}</p>
     </div>
     <div class="heading-actions">
@@ -36,3 +37,8 @@ defineEmits<{ reanalyze: []; importClips: [] }>()
     <div class="metric-cell"><div class="metric-label">待归属</div><div class="metric-value">{{ unresolvedCount }}</div><div class="metric-subline">需要人工判断</div></div>
   </section>
 </template>
+
+<style scoped>
+.team-heading{display:inline-flex;align-items:center;gap:9px}
+.team-heading :deep(.team-color-swatch){vertical-align:middle}
+</style>

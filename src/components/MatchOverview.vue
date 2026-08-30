@@ -2,6 +2,7 @@
 import { Film } from 'lucide-vue-next'
 import ClipCard from './ClipCard.vue'
 import type { Clip, Team } from '../types'
+import TeamColorSwatch from './TeamColorSwatch.vue'
 
 defineProps<{
   homeTeam?: Team
@@ -18,7 +19,7 @@ defineEmits<{ openClip: [clip: Clip] }>()
   <section class="tool-panel team-overview-panel">
     <div class="overview-columns">
       <div v-for="group in [{ key: 'home', label: '主队', team: homeTeam, clips: homeClips }, { key: 'away', label: '客队', team: awayTeam, clips: awayClips }]" :key="group.key" class="overview-column">
-        <div class="panel-header"><div><div class="panel-kicker">{{ group.label }}片段</div><h2>{{ group.team?.name || group.label }} · 片段集锦</h2></div><span class="highlight-count">{{ group.clips.length }} 个片段</span></div>
+        <div class="panel-header"><div><div class="panel-kicker">{{ group.label }}片段</div><h2 class="team-overview-title"><TeamColorSwatch :color="group.team?.color" />{{ group.team?.name || group.label }} · 片段集锦</h2></div><span class="highlight-count">{{ group.clips.length }} 个片段</span></div>
         <div v-if="group.clips.length" class="team-highlight-grid">
           <ClipCard v-for="clip in group.clips" :key="clip.id" :clip="clip" @open="$emit('openClip', $event)" />
         </div>
@@ -34,3 +35,7 @@ defineEmits<{ openClip: [clip: Clip] }>()
     </div>
   </section>
 </template>
+
+<style scoped>
+.team-overview-title{display:flex;align-items:center;gap:8px}
+</style>

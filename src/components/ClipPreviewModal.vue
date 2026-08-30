@@ -3,6 +3,7 @@ import { computed, onMounted, ref, watch } from 'vue'
 import { Trash2, X } from 'lucide-vue-next'
 import { clipSource, statusLabel } from '../presentation'
 import type { Clip, Team } from '../types'
+import TeamColorSwatch from './TeamColorSwatch.vue'
 
 const props = defineProps<{ clip: Clip; homeTeam?: Team; awayTeam?: Team; busy: boolean }>()
 const emit = defineEmits<{
@@ -61,14 +62,14 @@ onMounted(() => void videoRef.value?.play().catch(() => undefined))
          <video v-if="clip.previewUrl" ref="videoRef" controls playsinline :src="clip.previewUrl"></video>
          <div v-else class="professional-empty"><strong>该片段暂无可播放预览</strong></div>
        </div>
-       <div class="highlight-player-meta"><span>片段状态 {{ statusLabel(clip.status) }}</span><span>球队归属 {{ assignedTeamName }}</span></div>
+       <div class="highlight-player-meta"><span>片段状态 {{ statusLabel(clip.status) }}</span><span class="assigned-team"><TeamColorSwatch :color="clip.teamId === homeTeam?.id ? homeTeam?.color : clip.teamId === awayTeam?.id ? awayTeam?.color : null" />球队归属 {{ assignedTeamName }}</span></div>
        <div class="clip-detail-actions">
          <div class="clip-detail-team-label"><span class="panel-kicker">片段归属</span><strong>{{ assignedTeamName }}</strong></div>
          <template v-if="!teamConfirmed">
            <div class="team-assignment-editor">
              <div class="team-choice" aria-label="选择片段归属">
-               <button v-if="homeTeam?.id" type="button" :disabled="busy" :class="{ selected: selectedTeamId === homeTeam.id }" @click="selectTeam(homeTeam.id)">{{ homeTeam.name }}</button>
-               <button v-if="awayTeam?.id" type="button" :disabled="busy" :class="{ selected: selectedTeamId === awayTeam.id }" @click="selectTeam(awayTeam.id)">{{ awayTeam.name }}</button>
+             <button v-if="homeTeam?.id" type="button" :disabled="busy" :class="{ selected: selectedTeamId === homeTeam.id }" @click="selectTeam(homeTeam.id)"><TeamColorSwatch :color="homeTeam.color" />{{ homeTeam.name }}</button>
+             <button v-if="awayTeam?.id" type="button" :disabled="busy" :class="{ selected: selectedTeamId === awayTeam.id }" @click="selectTeam(awayTeam.id)"><TeamColorSwatch :color="awayTeam.color" />{{ awayTeam.name }}</button>
                <button type="button" :disabled="busy" :class="{ selected: selectedTeamId === null }" @click="selectTeam(null)">待判断</button>
              </div>
              <button class="button button-acid" type="button" :disabled="busy" @click="emit('confirmTeam', selectedTeamId)">确认归属</button>
@@ -80,8 +81,8 @@ onMounted(() => void videoRef.value?.play().catch(() => undefined))
          <template v-else>
            <div class="team-assignment-editor">
              <div class="team-choice" aria-label="修正片段归属">
-               <button v-if="homeTeam?.id" type="button" :disabled="busy" :class="{ selected: selectedTeamId === homeTeam.id }" @click="selectTeam(homeTeam.id)">{{ homeTeam.name }}</button>
-               <button v-if="awayTeam?.id" type="button" :disabled="busy" :class="{ selected: selectedTeamId === awayTeam.id }" @click="selectTeam(awayTeam.id)">{{ awayTeam.name }}</button>
+               <button v-if="homeTeam?.id" type="button" :disabled="busy" :class="{ selected: selectedTeamId === homeTeam.id }" @click="selectTeam(homeTeam.id)"><TeamColorSwatch :color="homeTeam.color" />{{ homeTeam.name }}</button>
+               <button v-if="awayTeam?.id" type="button" :disabled="busy" :class="{ selected: selectedTeamId === awayTeam.id }" @click="selectTeam(awayTeam.id)"><TeamColorSwatch :color="awayTeam.color" />{{ awayTeam.name }}</button>
                <button type="button" :disabled="busy" :class="{ selected: selectedTeamId === null }" @click="selectTeam(null)">待判断</button>
              </div>
              <div class="team-assignment-actions">
@@ -97,6 +98,6 @@ onMounted(() => void videoRef.value?.play().catch(() => undefined))
 </template>
 
 <style scoped>
-.clip-detail-actions{display:flex;align-items:flex-end;justify-content:space-between;gap:16px;padding-top:18px}.clip-detail-team-label{display:grid;gap:5px;margin-right:auto}.clip-detail-team-label strong{color:#dfe9df;font-size:12px}.team-assignment-editor{display:grid;justify-items:end;gap:10px}.team-assignment-actions{display:flex;gap:7px}.button-danger{color:#ffd7cf;background:#301815;border:1px solid #8d3f34}.button-danger:hover{color:#fff;background:#a33d30;border-color:#c95849}.team-choice button:disabled{cursor:not-allowed;opacity:.45}
+.clip-detail-actions{display:flex;align-items:flex-end;justify-content:space-between;gap:16px;padding-top:18px}.clip-detail-team-label{display:grid;gap:5px;margin-right:auto}.clip-detail-team-label strong{color:#dfe9df;font-size:12px}.team-assignment-editor{display:grid;justify-items:end;gap:10px}.team-assignment-actions{display:flex;gap:7px}.button-danger{color:#ffd7cf;background:#301815;border:1px solid #8d3f34}.button-danger:hover{color:#fff;background:#a33d30;border-color:#c95849}.team-choice button:disabled{cursor:not-allowed;opacity:.45}.team-choice button{display:inline-flex;align-items:center;gap:6px}
 @media(max-width:760px){.clip-detail-actions{align-items:stretch;flex-direction:column}.button-danger{width:100%}}
 </style>
