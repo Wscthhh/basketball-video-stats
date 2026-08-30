@@ -218,6 +218,12 @@ class ApiTest(unittest.TestCase):
         self.assertEqual(set(ids), {"home-clip", "away-clip", "unresolved-clip"})
         self.assertEqual(result["home"]["clips"][0]["teamSource"], "manual")
 
+        with main.db() as c:
+            c.execute("UPDATE clips SET team_id=?,team_source='ai' WHERE id=?", (home_id, "unresolved-clip"))
+        result = self.client.get(f"/api/matches/{match_id}/clips/collections").json()
+        self.assertEqual([clip["id"] for clip in result["home"]["clips"]], ["home-clip"])
+        self.assertEqual([clip["id"] for clip in result["unresolved"]], ["unresolved-clip"])
+
     def test_clip_team_review_sample_confirm_update_clear_and_list(self) -> None:
         match_id = self.client.post("/api/matches", json={"name": "Clip review", "homeTeam": {"name": "Home"}, "awayTeam": {"name": "Away"}}).json()["id"]
         video = main.DATA_DIR / "source.mp4"

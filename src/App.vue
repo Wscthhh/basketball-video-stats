@@ -42,9 +42,10 @@ const runs = computed(() => workspace.value?.runs ?? [])
 const activeClip = computed(() => clips.value.find((clip) => clip.id === activeClipId.value) ?? null)
 const homeTeam = computed(() => workspace.value?.teams.find((team) => team.side === 'home') ?? match.value?.homeTeam)
 const awayTeam = computed(() => workspace.value?.teams.find((team) => team.side === 'away') ?? match.value?.awayTeam)
-const unresolvedClips = computed(() => collections.value?.unresolved ?? clips.value.filter((clip) => !clip.teamId))
-const homeClips = computed(() => collections.value?.home.clips ?? clips.value.filter((clip) => clip.teamId === homeTeam.value?.id))
-const awayClips = computed(() => collections.value?.away.clips ?? clips.value.filter((clip) => clip.teamId === awayTeam.value?.id))
+const isConfirmedClip = (clip: Clip) => clip.teamConfirmed === true || clip.teamSource === 'manual'
+const unresolvedClips = computed(() => collections.value?.unresolved ?? clips.value.filter((clip) => !isConfirmedClip(clip)))
+const homeClips = computed(() => collections.value?.home.clips ?? clips.value.filter((clip) => isConfirmedClip(clip) && clip.teamId === homeTeam.value?.id))
+const awayClips = computed(() => collections.value?.away.clips ?? clips.value.filter((clip) => isConfirmedClip(clip) && clip.teamId === awayTeam.value?.id))
 const readyModels = computed(() => Object.entries(health.value?.analyzer?.models ?? {}).filter(([, model]) => model.ready).map(([name]) => name).join(' / '))
 
 function fail(error: unknown) {
@@ -55,9 +56,9 @@ function fallbackCollections(result: Workspace): ClipCollections {
   const homeId = result.match.homeTeam.id ?? result.teams.find((team) => team.side === 'home')?.id
   const awayId = result.match.awayTeam.id ?? result.teams.find((team) => team.side === 'away')?.id
   return {
-    home: { team: result.match.homeTeam, clips: result.clips.filter((clip) => clip.teamId === homeId) },
-    away: { team: result.match.awayTeam, clips: result.clips.filter((clip) => clip.teamId === awayId) },
-    unresolved: result.clips.filter((clip) => clip.teamId !== homeId && clip.teamId !== awayId),
+    home: { team: result.match.homeTeam, clips: result.clips.filter((clip) => isConfirmedClip(clip) && clip.teamId === homeId) },
+    away: { team: result.match.awayTeam, clips: result.clips.filter((clip) => isConfirmedClip(clip) && clip.teamId === awayId) },
+    unresolved: result.clips.filter((clip) => !isConfirmedClip(clip) || (clip.teamId !== homeId && clip.teamId !== awayId)),
   }
 }
 

@@ -9,7 +9,7 @@ defineEmits<{ openClip: [clip: Clip] }>()
 
 <template>
   <section class="tool-panel review-panel">
-    <div class="panel-header"><div><div class="panel-kicker">CLIP OWNERSHIP</div><h2>片段归属队列</h2></div><span class="highlight-count">{{ clips.length }} 个待判断</span></div>
+    <div class="panel-header"><div><div class="panel-kicker">CLIP OWNERSHIP</div><h2>片段复核队列</h2></div><span class="highlight-count">{{ clips.length }} 个待确认</span></div>
     <div v-if="clips.length" class="event-list review-list">
       <article v-for="clip in clips" :key="clip.id" class="event-item clip-review-item" role="button" tabindex="0" @click="$emit('openClip', clip)" @keydown.enter="$emit('openClip', clip)" @keydown.space.prevent="$emit('openClip', clip)">
         <div class="clip-review-video">

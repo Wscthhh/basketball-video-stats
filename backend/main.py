@@ -165,7 +165,12 @@ def clip_payload(row: sqlite3.Row) -> dict[str, Any]:
     value = camel(row)
     value["name"] = row["filename"]
     value["previewUrl"] = f"/media/{row['match_id']}/{row['id']}/{row['filename']}"
+    value["teamConfirmed"] = row["team_source"] == "manual"
     return value
+
+
+def clip_team_is_confirmed(row: sqlite3.Row) -> bool:
+    return row["team_source"] == "manual"
 
 
 def capture_clip_team_sample(clip: sqlite3.Row, sample_dir: Path) -> list[str]:
@@ -438,7 +443,7 @@ async def clip_collections(match_id: str) -> dict[str, Any]:
         for row in c.execute("SELECT * FROM clips WHERE match_id=? ORDER BY created_at DESC", (match_id,)):
             clip = clip_payload(row)
             side = team_sides.get(row["team_id"])
-            groups[side]["clips"].append(clip) if side in ("home", "away") else groups["unresolved"].append(clip)
+            groups[side]["clips"].append(clip) if clip_team_is_confirmed(row) and side in ("home", "away") else groups["unresolved"].append(clip)
         return groups
 
 
