@@ -17,7 +17,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, Field
 
-from .analyzer import BasketballAnalyzer, resolve_command
+from .analyzer import BasketballAnalyzer, classify_clip_team, resolve_command
 from .team_classifier import classify as classify_team
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -50,7 +50,7 @@ def db() -> sqlite3.Connection:
 def init_db() -> None:
     with db() as c:
         c.executescript("""
-        CREATE TABLE IF NOT EXISTS clips (id TEXT PRIMARY KEY, match_id TEXT NOT NULL, filename TEXT NOT NULL, stored_path TEXT NOT NULL, sha256 TEXT NOT NULL UNIQUE, size_bytes INTEGER NOT NULL, duration REAL, status TEXT NOT NULL DEFAULT 'queued', confidence REAL NOT NULL DEFAULT 0, created_at TEXT NOT NULL);
+        CREATE TABLE IF NOT EXISTS clips (id TEXT PRIMARY KEY, match_id TEXT NOT NULL, filename TEXT NOT NULL, stored_path TEXT NOT NULL, sha256 TEXT NOT NULL UNIQUE, size_bytes INTEGER NOT NULL, duration REAL, status TEXT NOT NULL DEFAULT 'queued', confidence REAL NOT NULL DEFAULT 0, created_at TEXT NOT NULL, team_id TEXT, team_source TEXT NOT NULL DEFAULT 'unresolved', team_confidence REAL NOT NULL DEFAULT 0, team_evidence TEXT NOT NULL DEFAULT '无法从片段可靠判断球队');
         CREATE TABLE IF NOT EXISTS analysis_events (id TEXT PRIMARY KEY, clip_id TEXT NOT NULL, event_type TEXT NOT NULL, seconds REAL NOT NULL, confidence REAL NOT NULL, status TEXT NOT NULL DEFAULT 'pending', player_id TEXT, description TEXT NOT NULL DEFAULT '', source TEXT NOT NULL DEFAULT '', team_source TEXT, confirmed_by TEXT, confirmation_rule TEXT, FOREIGN KEY(clip_id) REFERENCES clips(id));
         CREATE TABLE IF NOT EXISTS matches (id TEXT PRIMARY KEY, name TEXT NOT NULL, played_at TEXT, venue TEXT, status TEXT NOT NULL DEFAULT 'draft', is_test INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS teams (id TEXT PRIMARY KEY, match_id TEXT NOT NULL, side TEXT NOT NULL, name TEXT NOT NULL DEFAULT '', color TEXT, UNIQUE(match_id, side), FOREIGN KEY(match_id) REFERENCES matches(id));
@@ -61,6 +61,13 @@ def init_db() -> None:
         CREATE TABLE IF NOT EXISTS review_samples (id TEXT PRIMARY KEY, match_id TEXT NOT NULL, clip_id TEXT NOT NULL, event_id TEXT NOT NULL UNIQUE, label TEXT NOT NULL, shot_type TEXT, player_id TEXT, seconds REAL NOT NULL, metadata_json TEXT NOT NULL DEFAULT '{}', created_at TEXT NOT NULL, FOREIGN KEY(match_id) REFERENCES matches(id), FOREIGN KEY(clip_id) REFERENCES clips(id), FOREIGN KEY(event_id) REFERENCES analysis_events(id));
         """)
         run_columns = {r["name"] for r in c.execute("PRAGMA table_info(analysis_runs)")}
+        clip_columns = {r["name"] for r in c.execute("PRAGMA table_info(clips)")}
+        for name, definition in {"team_id": "TEXT", "team_source": "TEXT", "team_confidence": "REAL NOT NULL DEFAULT 0", "team_evidence": "TEXT"}.items():
+            if name not in clip_columns:
+                c.execute(f"ALTER TABLE clips ADD COLUMN {name} {definition}")
+        c.execute("UPDATE clips SET team_source='unresolved' WHERE team_source IS NULL")
+        c.execute("UPDATE clips SET team_confidence=0 WHERE team_confidence IS NULL")
+        c.execute("UPDATE clips SET team_evidence='无法从片段可靠判断球队' WHERE team_evidence IS NULL")
         for name, definition in {"total_clips": "INTEGER NOT NULL DEFAULT 0", "completed_clips": "INTEGER NOT NULL DEFAULT 0", "details_json": "TEXT NOT NULL DEFAULT '{}'"}.items():
             if name not in run_columns:
                 c.execute(f"ALTER TABLE analysis_runs ADD COLUMN {name} {definition}")
@@ -108,7 +115,7 @@ def row_payload(row: sqlite3.Row | None) -> dict[str, Any] | None:
 
 
 def camel(row: sqlite3.Row | dict[str, Any]) -> dict[str, Any]:
-    names = {"match_id": "matchId", "team_id": "teamId", "team_source": "teamSource", "player_id": "playerId", "clip_id": "clipId", "run_id": "runId", "event_type": "type", "event_id": "eventId", "shot_type": "shotType", "shot_type_confidence": "shotTypeConfidence", "shot_type_source": "shotTypeSource", "court_x": "courtX", "court_y": "courtY", "homography_confidence": "homographyConfidence", "release_frame": "releaseFrame", "local_track_key": "localTrackKey", "identity_type": "identityType", "is_test": "isTest", "played_at": "playedAt", "created_at": "createdAt", "updated_at": "updatedAt", "confirmed_at": "confirmedAt", "confirmed_by": "confirmedBy", "confirmation_rule": "confirmationRule", "highlight_start": "highlightStart", "highlight_end": "highlightEnd", "stored_path": "storedPath", "size_bytes": "sizeBytes", "preview_url": "previewUrl", "started_at": "startedAt", "finished_at": "finishedAt", "number_confidence": "numberConfidence", "number_source": "numberSource", "number_candidates_json": "numberCandidates"}
+    names = {"match_id": "matchId", "team_id": "teamId", "team_source": "teamSource", "team_confidence": "teamConfidence", "team_evidence": "teamEvidence", "player_id": "playerId", "clip_id": "clipId", "run_id": "runId", "event_type": "type", "event_id": "eventId", "shot_type": "shotType", "shot_type_confidence": "shotTypeConfidence", "shot_type_source": "shotTypeSource", "court_x": "courtX", "court_y": "courtY", "homography_confidence": "homographyConfidence", "release_frame": "releaseFrame", "local_track_key": "localTrackKey", "identity_type": "identityType", "is_test": "isTest", "played_at": "playedAt", "created_at": "createdAt", "updated_at": "updatedAt", "confirmed_at": "confirmedAt", "confirmed_by": "confirmedBy", "confirmation_rule": "confirmationRule", "highlight_start": "highlightStart", "highlight_end": "highlightEnd", "stored_path": "storedPath", "size_bytes": "sizeBytes", "preview_url": "previewUrl", "started_at": "startedAt", "finished_at": "finishedAt", "number_confidence": "numberConfidence", "number_source": "numberSource", "number_candidates_json": "numberCandidates"}
     return {names.get(k, k): v for k, v in dict(row).items()}
 
 
@@ -193,6 +200,10 @@ class EventPatch(InputModel):
     points: int | None = Field(None, ge=0, le=3)
 
 
+class ClipPatch(InputModel):
+    team_id: str | None = None
+
+
 class PlayerPatch(InputModel):
     name: str | None = None
     number: str | None = None
@@ -275,6 +286,39 @@ async def patch_match(match_id: str, data: MatchPatch) -> dict[str, Any]:
 async def list_clips(match_id: str) -> list[dict[str, Any]]:
     with db() as c:
         require_match(match_id, c); return [clip_payload(r) for r in c.execute("SELECT * FROM clips WHERE match_id=? ORDER BY created_at DESC", (match_id,))]
+
+
+@app.patch("/api/clips/{clip_id}")
+async def patch_clip(clip_id: str, data: ClipPatch) -> dict[str, Any]:
+    with db() as c:
+        clip = c.execute("SELECT * FROM clips WHERE id=?", (clip_id,)).fetchone()
+        if not clip:
+            raise HTTPException(404, "clip not found")
+        values = data.model_dump(exclude_unset=True)
+        if "team_id" not in values:
+            return clip_payload(clip)
+        team_id = values["team_id"]
+        if team_id is not None and not c.execute("SELECT id FROM teams WHERE id=? AND match_id=?", (team_id, clip["match_id"])).fetchone():
+            raise HTTPException(422, "team does not belong to match")
+        if team_id is None:
+            c.execute("UPDATE clips SET team_id=NULL,team_source='unresolved',team_confidence=0,team_evidence='无法从片段可靠判断球队' WHERE id=?", (clip_id,))
+        else:
+            c.execute("UPDATE clips SET team_id=?,team_source='manual',team_confidence=1,team_evidence='手动指定球队' WHERE id=?", (team_id, clip_id))
+        return clip_payload(c.execute("SELECT * FROM clips WHERE id=?", (clip_id,)).fetchone())
+
+
+@app.get("/api/matches/{match_id}/clips/collections")
+async def clip_collections(match_id: str) -> dict[str, Any]:
+    with db() as c:
+        require_match(match_id, c)
+        teams = {row["side"]: team_payload(row) for row in c.execute("SELECT * FROM teams WHERE match_id=?", (match_id,))}
+        groups: dict[str, Any] = {"home": {"team": teams.get("home"), "clips": []}, "away": {"team": teams.get("away"), "clips": []}, "unresolved": []}
+        team_sides = {team["id"]: side for side, team in teams.items() if team.get("id")}
+        for row in c.execute("SELECT * FROM clips WHERE match_id=? ORDER BY created_at DESC", (match_id,)):
+            clip = clip_payload(row)
+            side = team_sides.get(row["team_id"])
+            groups[side]["clips"].append(clip) if side in ("home", "away") else groups["unresolved"].append(clip)
+        return groups
 
 
 @app.post("/api/matches/{match_id}/clips")
@@ -767,6 +811,14 @@ async def run_analysis(run_id: str, match_id: str, clip_ids: list[str], device: 
                     track_players[track.local_track_key] = player_id
                     prior_track = c.execute("SELECT id FROM player_tracks WHERE clip_id=? AND local_track_key=?", (clip_id, track.local_track_key)).fetchone()
                     c.execute("INSERT OR REPLACE INTO player_tracks(id,clip_id,player_id,local_track_key,team_id,confidence) VALUES(?,?,?,?,?,?)", (prior_track["id"] if prior_track else uuid.uuid4().hex, clip_id, player_id, track.local_track_key, team_id, track.confidence))
+                current_clip = c.execute("SELECT team_source FROM clips WHERE id=?", (clip_id,)).fetchone()
+                if not current_clip or current_clip["team_source"] != "manual":
+                    teams = [dict(row) for row in c.execute("SELECT id,color FROM teams WHERE match_id=? ORDER BY side", (match_id,)).fetchall()]
+                    decision = classify_clip_team(inspection.tracks, teams)
+                    if decision.team_id is None:
+                        c.execute("UPDATE clips SET team_id=NULL,team_source='unresolved',team_confidence=0,team_evidence=? WHERE id=?", (decision.evidence, clip_id))
+                    else:
+                        c.execute("UPDATE clips SET team_id=?,team_source='ai',team_confidence=?,team_evidence=? WHERE id=?", (decision.team_id, decision.confidence, decision.evidence, clip_id))
                 for candidate in inspection.events:
                     event_type = {"投篮": "attempt", "命中": "make"}.get(candidate.event_type, candidate.event_type)
                     fingerprint = f"{clip_id}/{event_type}/{int(candidate.seconds/0.2)}/{candidate.source}"

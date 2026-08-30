@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any
 
 from .court_geometry import ShotClassification, classify_fiba_shot, projection_from_pose_result, transform_point
+from .team_classifier import TeamMatch, classify as classify_team, parse_hex
 
 SAMPLE_FPS = 10
 MAX_FRAMES = 140
@@ -55,6 +56,37 @@ class InspectionResult:
     tracks: list[TrackCandidate] = field(default_factory=list)
     metrics: dict[str, object] = field(default_factory=dict)
     error: str = ""
+
+
+@dataclass(frozen=True)
+class ClipTeamDecision:
+    team_id: str | None
+    confidence: float
+    evidence: str
+
+
+def classify_clip_team(tracks: list[TrackCandidate], teams: list[dict[str, str | None]]) -> ClipTeamDecision:
+    """Choose a clip team from stable jersey tracks, independently of shot events."""
+    if len(teams) != 2 or any(not parse_hex(team.get("color")) for team in teams):
+        return ClipTeamDecision(None, 0, "无法从片段可靠判断球队")
+    votes: dict[str, list[TeamMatch]] = {}
+    for track in tracks:
+        if track.detections < 3 or track.jersey_rgb is None:
+            continue
+        result = classify_team(track.jersey_rgb, teams)
+        if result.team_id is not None and result.confidence >= 0.18:
+            votes.setdefault(result.team_id, []).append(result)
+    ranked = sorted(votes.items(), key=lambda item: (-len(item[1]), -sum(v.confidence for v in item[1])))
+    if not ranked:
+        return ClipTeamDecision(None, 0, "无法从片段可靠判断球队")
+    winner_id, winner_votes = ranked[0]
+    winner_score = sum(item.confidence for item in winner_votes)
+    loser_votes = ranked[1][1] if len(ranked) > 1 else []
+    loser_score = sum(item.confidence for item in loser_votes)
+    if loser_votes and (len(winner_votes) == len(loser_votes) or winner_score <= loser_score):
+        return ClipTeamDecision(None, 0, "无法从片段可靠判断球队")
+    confidence = winner_score / len(winner_votes)
+    return ClipTeamDecision(str(winner_id), round(confidence, 4), f"{len(winner_votes)} 条稳定轨迹的球衣颜色匹配")
 
 
 @dataclass

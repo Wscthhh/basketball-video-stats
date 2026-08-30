@@ -1,10 +1,13 @@
+import asyncio
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from fastapi.testclient import TestClient
 
 import backend.main as main
+from backend.analyzer import InspectionResult, TrackCandidate
 
 
 class ApiTest(unittest.TestCase):
@@ -41,7 +44,7 @@ class ApiTest(unittest.TestCase):
     def test_stats_merge_and_explicit_clear(self) -> None:
         match_id = self.client.post("/api/matches", json={"name": "Stats", "homeTeam": {"name": "A"}, "awayTeam": {"name": "B"}}).json()["id"]
         with main.db() as c:
-            c.execute("INSERT INTO clips VALUES(?,?,?,?,?,?,?,?,?,?)", ("clip-1", match_id, "x.mp4", "x.mp4", "hash-1", 1, 10, "review", 1, main.now()))
+            c.execute("INSERT INTO clips(id,match_id,filename,stored_path,sha256,size_bytes,duration,status,confidence,created_at) VALUES(?,?,?,?,?,?,?,?,?,?)", ("clip-1", match_id, "x.mp4", "x.mp4", "hash-1", 1, 10, "review", 1, main.now()))
             c.execute("INSERT INTO players(id,match_id,code,name,status) VALUES(?,?,?,?,?)", ("p1", match_id, "tmp-1", "", "unconfirmed"))
             c.execute("INSERT INTO players(id,match_id,code,name,status) VALUES(?,?,?,?,?)", ("p2", match_id, "tmp-2", "", "unconfirmed"))
             c.execute("INSERT INTO analysis_events(id,clip_id,event_type,seconds,confidence,status,player_id,points,source,fingerprint,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)", ("e1", "clip-1", "attempt", 2, .8, "pending", "p1", None, "test", "fp1", main.now()))
@@ -63,7 +66,7 @@ class ApiTest(unittest.TestCase):
     def test_team_only_make_confirmation_scoring_and_sample(self) -> None:
         match_id = self.client.post("/api/matches", json={"name": "Scoring", "homeTeam": {"name": "Home"}, "awayTeam": {"name": "Away"}}).json()["id"]
         with main.db() as c:
-            c.execute("INSERT INTO clips VALUES(?,?,?,?,?,?,?,?,?,?)", ("scoring-clip", match_id, "x.mp4", "x.mp4", "scoring-hash", 1, 10, "review", 1, main.now()))
+            c.execute("INSERT INTO clips(id,match_id,filename,stored_path,sha256,size_bytes,duration,status,confidence,created_at) VALUES(?,?,?,?,?,?,?,?,?,?)", ("scoring-clip", match_id, "x.mp4", "x.mp4", "scoring-hash", 1, 10, "review", 1, main.now()))
             c.execute("INSERT INTO analysis_events(id,clip_id,event_type,seconds,confidence,status,points,source,updated_at) VALUES(?,?,?,?,?,?,?,?,?)", ("scoring-event", "scoring-clip", "make", 2, .91, "pending", None, "ai", main.now()))
             c.execute("INSERT INTO analysis_events(id,clip_id,event_type,seconds,confidence,status,points,source,updated_at,team_id) VALUES(?,?,?,?,?,?,?,?,?,?)", ("away-event", "scoring-clip", "make", 3, .8, "pending", None, "ai", main.now(), f"{match_id}-away"))
             c.execute("INSERT INTO analysis_events(id,clip_id,event_type,seconds,confidence,status,points,source,updated_at) VALUES(?,?,?,?,?,?,?,?,?)", ("unassigned-event", "scoring-clip", "make", 4, .7, "pending", None, "ai", main.now()))
@@ -111,7 +114,7 @@ class ApiTest(unittest.TestCase):
     def test_cleanup_preserves_fixture_and_revised_confirmation(self) -> None:
         match_id = self.client.post("/api/matches", json={"name": "Cleanup", "homeTeam": {"name": "A"}, "awayTeam": {"name": "B"}}).json()["id"]
         with main.db() as c:
-            c.execute("INSERT INTO clips VALUES(?,?,?,?,?,?,?,?,?,?)", ("cleanup-clip", match_id, "x.mp4", "x.mp4", "cleanup-hash", 1, 10, "review", 1, main.now()))
+            c.execute("INSERT INTO clips(id,match_id,filename,stored_path,sha256,size_bytes,duration,status,confidence,created_at) VALUES(?,?,?,?,?,?,?,?,?,?)", ("cleanup-clip", match_id, "x.mp4", "x.mp4", "cleanup-hash", 1, 10, "review", 1, main.now()))
             c.execute("INSERT INTO players(id,match_id,code,identity_type,status) VALUES(?,?,?,?,?)", ("temporary-player", match_id, "tmp", "temporary", "unconfirmed"))
             c.execute("INSERT INTO players(id,match_id,code,identity_type,status) VALUES(?,?,?,?,?)", ("manual-player", match_id, "manual", "manual", "confirmed"))
             for event_id, player_id, source, status in (("auto-event", "temporary-player", "ai", "pending"), ("fixture-event", "manual-player", "test-fixture", "confirmed")):
@@ -126,6 +129,37 @@ class ApiTest(unittest.TestCase):
             self.assertIsNotNone(c.execute("SELECT id FROM analysis_events WHERE id='fixture-event'").fetchone())
             self.assertIsNone(c.execute("SELECT id FROM players WHERE id='temporary-player'").fetchone())
             self.assertIsNotNone(c.execute("SELECT id FROM players WHERE id='manual-player'").fetchone())
+
+    def test_clip_patch_and_collections_include_every_clip(self) -> None:
+        match_id = self.client.post("/api/matches", json={"name": "Collections", "homeTeam": {"name": "Home"}, "awayTeam": {"name": "Away"}}).json()["id"]
+        with main.db() as c:
+            for clip_id in ("home-clip", "away-clip", "unresolved-clip"):
+                c.execute("INSERT INTO clips(id,match_id,filename,stored_path,sha256,size_bytes,duration,status,confidence,created_at) VALUES(?,?,?,?,?,?,?,?,?,?)", (clip_id, match_id, "x.mp4", "x.mp4", clip_id, 1, 10, "review", 1, main.now()))
+        home_id, away_id = f"{match_id}-home", f"{match_id}-away"
+        self.assertEqual(self.client.patch("/api/clips/home-clip", json={"teamId": home_id}).status_code, 200)
+        self.assertEqual(self.client.patch("/api/clips/away-clip", json={"teamId": away_id}).status_code, 200)
+        invalid = self.client.patch("/api/clips/unresolved-clip", json={"teamId": "other-team"})
+        self.assertEqual(invalid.status_code, 422)
+        result = self.client.get(f"/api/matches/{match_id}/clips/collections").json()
+        ids = [clip["id"] for side in ("home", "away") for clip in result[side]["clips"]] + [clip["id"] for clip in result["unresolved"]]
+        self.assertEqual(set(ids), {"home-clip", "away-clip", "unresolved-clip"})
+        self.assertEqual(result["home"]["clips"][0]["teamSource"], "manual")
+
+    def test_manual_clip_team_survives_analysis(self) -> None:
+        match_id = self.client.post("/api/matches", json={"name": "Manual team", "homeTeam": {"name": "Home", "color": "#ff0000"}, "awayTeam": {"name": "Away", "color": "#0000ff"}}).json()["id"]
+        with main.db() as c:
+            c.execute("INSERT INTO clips(id,match_id,filename,stored_path,sha256,size_bytes,duration,status,confidence,created_at,team_id,team_source) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)", ("manual-clip", match_id, "x.mp4", "x.mp4", "manual-hash", 1, 10, "processing", 0, main.now(), f"{match_id}-home", "manual"))
+            c.execute("INSERT INTO analysis_runs(id,match_id,status,device,total_clips,created_at) VALUES(?,?,?,?,?,?)", ("manual-run", match_id, "running", "cpu", 1, main.now()))
+
+        class FakeAnalyzer:
+            def inspect(self, *_args, **_kwargs):
+                return InspectionResult(tracks=[TrackCandidate("local-001", .9, 8, (0, 0, 255))])
+
+        with patch.object(main, "ANALYZER", FakeAnalyzer()):
+            asyncio.run(main.run_analysis("manual-run", match_id, ["manual-clip"], "cpu"))
+        with main.db() as c:
+            clip = c.execute("SELECT team_id,team_source FROM clips WHERE id='manual-clip'").fetchone()
+            self.assertEqual((clip["team_id"], clip["team_source"]), (f"{match_id}-home", "manual"))
 
 
 if __name__ == "__main__":
