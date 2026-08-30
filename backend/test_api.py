@@ -47,7 +47,7 @@ class ApiTest(unittest.TestCase):
             c.execute("INSERT INTO analysis_events(id,clip_id,event_type,seconds,confidence,status,player_id,points,source,fingerprint,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)", ("e1", "clip-1", "attempt", 2, .8, "pending", "p1", None, "test", "fp1", main.now()))
             c.execute("INSERT INTO analysis_events(id,clip_id,event_type,seconds,confidence,status,player_id,points,source,fingerprint,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)", ("e2", "clip-1", "make", 3, .8, "confirmed", "p1", 2, "test", "fp2", main.now()))
         self.assertEqual(self.client.patch("/api/events/e1", json={"status": "confirmed", "playerId": None, "teamId": None, "type": "attempt"}).status_code, 200)
-        classified = self.client.patch("/api/events/e2", json={"shotType": "threePoint"})
+        classified = self.client.patch("/api/events/e2", json={"shotType": "threePoint", "teamId": f"{match_id}-home"})
         self.assertEqual(classified.status_code, 200)
         self.assertEqual(classified.json()["points"], 3)
         stats = self.client.get(f"/api/matches/{match_id}/stats").json()
@@ -59,6 +59,32 @@ class ApiTest(unittest.TestCase):
         self.assertEqual(stats[1]["code"], "unassigned")
         merged = self.client.post("/api/players/merge", json={"sourcePlayerId": "p2", "targetPlayerId": "p1"})
         self.assertEqual(merged.status_code, 200)
+
+    def test_team_only_make_confirmation_scoring_and_sample(self) -> None:
+        match_id = self.client.post("/api/matches", json={"name": "Scoring", "homeTeam": {"name": "Home"}, "awayTeam": {"name": "Away"}}).json()["id"]
+        with main.db() as c:
+            c.execute("INSERT INTO clips VALUES(?,?,?,?,?,?,?,?,?,?)", ("scoring-clip", match_id, "x.mp4", "x.mp4", "scoring-hash", 1, 10, "review", 1, main.now()))
+            c.execute("INSERT INTO analysis_events(id,clip_id,event_type,seconds,confidence,status,points,source,updated_at) VALUES(?,?,?,?,?,?,?,?,?)", ("scoring-event", "scoring-clip", "make", 2, .91, "pending", None, "ai", main.now()))
+            c.execute("INSERT INTO analysis_events(id,clip_id,event_type,seconds,confidence,status,points,source,updated_at,team_id) VALUES(?,?,?,?,?,?,?,?,?,?)", ("away-event", "scoring-clip", "make", 3, .8, "pending", None, "ai", main.now(), f"{match_id}-away"))
+            c.execute("INSERT INTO analysis_events(id,clip_id,event_type,seconds,confidence,status,points,source,updated_at) VALUES(?,?,?,?,?,?,?,?,?)", ("unassigned-event", "scoring-clip", "make", 4, .7, "pending", None, "ai", main.now()))
+
+        response = self.client.patch(
+            "/api/events/scoring-event",
+            json={"status": "confirmed", "teamId": f"{match_id}-home"},
+        )
+        self.assertEqual(response.status_code, 200)
+        event = response.json()
+        self.assertEqual((event["status"], event["teamId"], event["teamSource"]), ("confirmed", f"{match_id}-home", "manual"))
+        self.assertIsNone(event["playerId"])
+        self.assertEqual(event["reviewSample"]["created"], True)
+
+        grouped = self.client.get(f"/api/matches/{match_id}/scoring").json()
+        self.assertEqual([item["id"] for item in grouped["home"]["events"]], ["scoring-event"])
+        self.assertEqual([item["id"] for item in grouped["away"]["events"]], ["away-event"])
+        self.assertEqual([item["id"] for item in grouped["unassigned"]], ["unassigned-event"])
+        samples = self.client.get(f"/api/matches/{match_id}/review-samples").json()
+        self.assertEqual(samples[0]["teamId"], f"{match_id}-home")
+        self.assertEqual(samples[0]["label"], "make")
 
     def test_upload_path_and_analysis_claim_validation(self) -> None:
         match_id = self.client.post("/api/matches", json={"name": "Upload", "homeTeam": {"name": "A"}, "awayTeam": {"name": "B"}}).json()["id"]

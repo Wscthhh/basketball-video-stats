@@ -1,5 +1,6 @@
 import builtins
 import asyncio
+import json
 import sqlite3
 import tempfile
 import unittest
@@ -26,13 +27,11 @@ class AutomaticConfirmationTest(unittest.TestCase):
         values.update(changes)
         return SimpleNamespace(**values)
 
-    def test_high_confidence_make_is_confirmed_with_points(self) -> None:
+    def test_high_confidence_make_stays_pending(self) -> None:
         result = main.automatic_confirmation(self.candidate(), "player", "team", 20)
-        self.assertEqual(result["status"], "confirmed")
-        self.assertEqual(result["points"], 3)
-        self.assertEqual(result["confirmed_by"], "ai")
-        self.assertEqual(result["confirmation_rule"], "high-confidence-make")
-        self.assertEqual((result["highlight_start"], result["highlight_end"]), (4, 13))
+        self.assertEqual(result["status"], "pending")
+        self.assertIsNone(result["points"])
+        self.assertIsNone(result["confirmed_by"])
 
     def test_make_must_meet_every_auto_confirmation_condition(self) -> None:
         cases = (
@@ -177,7 +176,7 @@ class ReviewSampleTest(unittest.TestCase):
                     connection.execute("INSERT INTO clips(id,match_id,filename,stored_path,sha256,size_bytes,duration,created_at) VALUES(?,?,?,?,?,?,?,?)", ("c", "m", "missing.mp4", str(Path(directory) / "missing.mp4"), "hash", 1, 10, main.now()))
                     connection.execute("INSERT INTO analysis_events(id,clip_id,event_type,seconds,status,confidence,shot_type,points) VALUES(?,?,?,?,?,?,?,?)", ("e", "c", "make", 2, "pending", .9, "twoPoint", 2))
                 client = TestClient(main.app)
-                response = client.patch("/api/events/e", json={"status": "confirmed", "shotType": "twoPoint"})
+                response = client.patch("/api/events/e", json={"status": "confirmed", "shotType": "twoPoint", "teamId": "m-home"})
                 self.assertEqual(response.status_code, 200)
                 self.assertEqual(response.json()["reviewSample"]["created"], True)
                 self.assertEqual(len(client.get("/api/matches/m/review-samples").json()), 1)
@@ -217,13 +216,13 @@ class ReanalysisTest(unittest.TestCase):
                     with main.db() as connection:
                         event = connection.execute("SELECT * FROM analysis_events WHERE clip_id=?", (clip_id,)).fetchone()
                     if run_id == "run-1":
-                        self.assertEqual((event["status"], event["confirmed_by"], event["points"]), ("confirmed", "ai", 3))
+                        self.assertEqual((event["status"], event["confirmed_by"], event["points"]), ("pending", None, None))
                         with main.db() as connection:
                             payload = main.event_payload(event, connection)
-                            stats = main.stats_for(connection, match_id)
-                        self.assertEqual((payload["confirmedBy"], payload["confirmationRule"]), ("ai", "high-confidence-make"))
+                        self.assertEqual((payload["confirmedBy"], payload["confirmationRule"]), (None, None))
                         self.assertEqual((payload["numberConfidence"], payload["numberSource"]), (.84, "ai"))
-                        self.assertEqual(stats[0]["numberCandidates"][0]["number"], "23")
+                        player = connection.execute("SELECT number_candidates_json FROM players WHERE id=?", (player_id,)).fetchone()
+                        self.assertEqual(json.loads(player["number_candidates_json"])[0]["number"], "23")
                         fake.confidence = .8
                     elif run_id == "run-2":
                         self.assertEqual((event["status"], event["confirmed_by"], event["points"]), ("pending", None, None))

@@ -51,7 +51,7 @@ def init_db() -> None:
     with db() as c:
         c.executescript("""
         CREATE TABLE IF NOT EXISTS clips (id TEXT PRIMARY KEY, match_id TEXT NOT NULL, filename TEXT NOT NULL, stored_path TEXT NOT NULL, sha256 TEXT NOT NULL UNIQUE, size_bytes INTEGER NOT NULL, duration REAL, status TEXT NOT NULL DEFAULT 'queued', confidence REAL NOT NULL DEFAULT 0, created_at TEXT NOT NULL);
-        CREATE TABLE IF NOT EXISTS analysis_events (id TEXT PRIMARY KEY, clip_id TEXT NOT NULL, event_type TEXT NOT NULL, seconds REAL NOT NULL, confidence REAL NOT NULL, status TEXT NOT NULL DEFAULT 'pending', player_id TEXT, description TEXT NOT NULL DEFAULT '', source TEXT NOT NULL DEFAULT '', confirmed_by TEXT, confirmation_rule TEXT, FOREIGN KEY(clip_id) REFERENCES clips(id));
+        CREATE TABLE IF NOT EXISTS analysis_events (id TEXT PRIMARY KEY, clip_id TEXT NOT NULL, event_type TEXT NOT NULL, seconds REAL NOT NULL, confidence REAL NOT NULL, status TEXT NOT NULL DEFAULT 'pending', player_id TEXT, description TEXT NOT NULL DEFAULT '', source TEXT NOT NULL DEFAULT '', team_source TEXT, confirmed_by TEXT, confirmation_rule TEXT, FOREIGN KEY(clip_id) REFERENCES clips(id));
         CREATE TABLE IF NOT EXISTS matches (id TEXT PRIMARY KEY, name TEXT NOT NULL, played_at TEXT, venue TEXT, status TEXT NOT NULL DEFAULT 'draft', is_test INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS teams (id TEXT PRIMARY KEY, match_id TEXT NOT NULL, side TEXT NOT NULL, name TEXT NOT NULL DEFAULT '', color TEXT, UNIQUE(match_id, side), FOREIGN KEY(match_id) REFERENCES matches(id));
         CREATE TABLE IF NOT EXISTS players (id TEXT PRIMARY KEY, match_id TEXT NOT NULL, team_id TEXT, code TEXT NOT NULL, name TEXT NOT NULL DEFAULT '', number TEXT, number_confidence REAL NOT NULL DEFAULT 0, number_source TEXT, number_candidates_json TEXT NOT NULL DEFAULT '[]', identity_type TEXT NOT NULL DEFAULT 'temporary', status TEXT NOT NULL DEFAULT 'unconfirmed', confidence REAL NOT NULL DEFAULT 0, appearance_r REAL, appearance_g REAL, appearance_b REAL, appearance_samples INTEGER NOT NULL DEFAULT 0, track_count_total INTEGER NOT NULL DEFAULT 0, cover_path TEXT, cover_score REAL, cover_source_clip_id TEXT, cover_source_seconds REAL, UNIQUE(match_id, code), FOREIGN KEY(match_id) REFERENCES matches(id));
@@ -66,7 +66,7 @@ def init_db() -> None:
                 c.execute(f"ALTER TABLE analysis_runs ADD COLUMN {name} {definition}")
         # Existing installations have no parent match table and old event columns.
         for name, definition in {
-            "team_id": "TEXT", "points": "INTEGER", "shot_type": "TEXT", "shot_type_confidence": "REAL NOT NULL DEFAULT 0", "shot_type_source": "TEXT", "court_x": "REAL", "court_y": "REAL", "homography_confidence": "REAL NOT NULL DEFAULT 0", "release_frame": "INTEGER", "run_id": "TEXT", "fingerprint": "TEXT", "highlight_start": "REAL", "highlight_end": "REAL", "confirmed_at": "TEXT", "updated_at": "TEXT", "local_track_key": "TEXT", "confirmed_by": "TEXT", "confirmation_rule": "TEXT"
+            "team_id": "TEXT", "team_source": "TEXT", "points": "INTEGER", "shot_type": "TEXT", "shot_type_confidence": "REAL NOT NULL DEFAULT 0", "shot_type_source": "TEXT", "court_x": "REAL", "court_y": "REAL", "homography_confidence": "REAL NOT NULL DEFAULT 0", "release_frame": "INTEGER", "run_id": "TEXT", "fingerprint": "TEXT", "highlight_start": "REAL", "highlight_end": "REAL", "confirmed_at": "TEXT", "updated_at": "TEXT", "local_track_key": "TEXT", "confirmed_by": "TEXT", "confirmation_rule": "TEXT"
         }.items():
             if name not in {r["name"] for r in c.execute("PRAGMA table_info(analysis_events)")}:
                 c.execute(f"ALTER TABLE analysis_events ADD COLUMN {name} {definition}")
@@ -86,6 +86,9 @@ def init_db() -> None:
             ).fetchall()
             for row in rows[1:]:
                 c.execute("UPDATE analysis_events SET fingerprint=NULL WHERE id=?", (row["id"],))
+        review_columns = {r["name"] for r in c.execute("PRAGMA table_info(review_samples)")}
+        if "team_id" not in review_columns:
+            c.execute("ALTER TABLE review_samples ADD COLUMN team_id TEXT")
         c.execute("CREATE UNIQUE INDEX IF NOT EXISTS ux_event_fingerprint ON analysis_events(fingerprint) WHERE fingerprint IS NOT NULL")
         c.execute("UPDATE analysis_events SET event_type='attempt' WHERE event_type='投篮'")
         c.execute("UPDATE analysis_events SET event_type='make' WHERE event_type='命中'")
@@ -105,7 +108,7 @@ def row_payload(row: sqlite3.Row | None) -> dict[str, Any] | None:
 
 
 def camel(row: sqlite3.Row | dict[str, Any]) -> dict[str, Any]:
-    names = {"match_id": "matchId", "team_id": "teamId", "player_id": "playerId", "clip_id": "clipId", "run_id": "runId", "event_type": "type", "event_id": "eventId", "shot_type": "shotType", "shot_type_confidence": "shotTypeConfidence", "shot_type_source": "shotTypeSource", "court_x": "courtX", "court_y": "courtY", "homography_confidence": "homographyConfidence", "release_frame": "releaseFrame", "local_track_key": "localTrackKey", "identity_type": "identityType", "is_test": "isTest", "played_at": "playedAt", "created_at": "createdAt", "updated_at": "updatedAt", "confirmed_at": "confirmedAt", "confirmed_by": "confirmedBy", "confirmation_rule": "confirmationRule", "highlight_start": "highlightStart", "highlight_end": "highlightEnd", "stored_path": "storedPath", "size_bytes": "sizeBytes", "preview_url": "previewUrl", "started_at": "startedAt", "finished_at": "finishedAt", "number_confidence": "numberConfidence", "number_source": "numberSource", "number_candidates_json": "numberCandidates"}
+    names = {"match_id": "matchId", "team_id": "teamId", "team_source": "teamSource", "player_id": "playerId", "clip_id": "clipId", "run_id": "runId", "event_type": "type", "event_id": "eventId", "shot_type": "shotType", "shot_type_confidence": "shotTypeConfidence", "shot_type_source": "shotTypeSource", "court_x": "courtX", "court_y": "courtY", "homography_confidence": "homographyConfidence", "release_frame": "releaseFrame", "local_track_key": "localTrackKey", "identity_type": "identityType", "is_test": "isTest", "played_at": "playedAt", "created_at": "createdAt", "updated_at": "updatedAt", "confirmed_at": "confirmedAt", "confirmed_by": "confirmedBy", "confirmation_rule": "confirmationRule", "highlight_start": "highlightStart", "highlight_end": "highlightEnd", "stored_path": "storedPath", "size_bytes": "sizeBytes", "preview_url": "previewUrl", "started_at": "startedAt", "finished_at": "finishedAt", "number_confidence": "numberConfidence", "number_source": "numberSource", "number_candidates_json": "numberCandidates"}
     return {names.get(k, k): v for k, v in dict(row).items()}
 
 
@@ -331,10 +334,15 @@ def stats_for(c: sqlite3.Connection, match_id: str) -> list[dict[str, Any]]:
 
 def event_payload(r: sqlite3.Row, c: sqlite3.Connection | None = None) -> dict[str, Any]:
     value = camel(r)
-    if c is not None and r["player_id"]:
-        player = c.execute("SELECT number,number_confidence,number_source,number_candidates_json FROM players WHERE id=?", (r["player_id"],)).fetchone()
-        if player:
-            value.update({"number": player["number"], "numberConfidence": player["number_confidence"], "numberSource": player["number_source"], "numberCandidates": json.loads(player["number_candidates_json"] or "[]")})
+    if c is not None:
+        if r["player_id"]:
+            player = c.execute("SELECT number,number_confidence,number_source,number_candidates_json FROM players WHERE id=?", (r["player_id"],)).fetchone()
+            if player:
+                value.update({"number": player["number"], "numberConfidence": player["number_confidence"], "numberSource": player["number_source"], "numberCandidates": json.loads(player["number_candidates_json"] or "[]")})
+        clip = c.execute("SELECT match_id,filename FROM clips WHERE id=?", (r["clip_id"],)).fetchone()
+        if clip:
+            value["previewUrl"] = f"/media/{clip['match_id']}/{r['clip_id']}/{clip['filename']}"
+        value["teamSource"] = r["team_source"] or ("unassigned" if not r["team_id"] else ("manual" if r["confirmed_by"] == "manual" or r["source"] == "manual" else "ai"))
     return value
 
 
@@ -367,31 +375,13 @@ def capture_review_sample(c: sqlite3.Connection, event: sqlite3.Row, match_id: s
     except Exception:
         frames = []
     metadata = {"frames": frames, "source": "manual-review", "eventType": event["event_type"], "playerId": event["player_id"], "teamId": event["team_id"]}
-    c.execute("INSERT INTO review_samples(id,match_id,clip_id,event_id,label,shot_type,player_id,seconds,metadata_json,created_at) VALUES(?,?,?,?,?,?,?,?,?,?)", (sample_id, match_id, clip["id"], event["id"], "make", event["shot_type"], event["player_id"], event["seconds"], json.dumps(metadata), now()))
+    c.execute("INSERT INTO review_samples(id,match_id,clip_id,event_id,label,shot_type,player_id,team_id,seconds,metadata_json,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)", (sample_id, match_id, clip["id"], event["id"], "make", event["shot_type"], event["player_id"], event["team_id"], event["seconds"], json.dumps(metadata), now()))
     return {"id": sample_id, "created": True, "frames": frames}
 
 
 def automatic_confirmation(candidate: Any, player_id: str | None, team_id: str | None, duration: float | None) -> dict[str, Any]:
-    qualifies = (
-        candidate.event_type in {"make", "命中"}
-        and candidate.confidence >= 0.88
-        and candidate.source == "ball-hoop-crossing"
-        and bool(player_id)
-        and bool(team_id)
-        and candidate.shot_type in {"freeThrow", "twoPoint", "threePoint"}
-        and candidate.shot_type_confidence >= 0.62
-    )
-    if not qualifies:
-        return {"status": "pending", "points": None, "confirmed_at": None, "confirmed_by": None, "confirmation_rule": None, "highlight_start": None, "highlight_end": None}
-    return {
-        "status": "confirmed",
-        "points": shot_points(candidate.shot_type),
-        "confirmed_at": now(),
-        "confirmed_by": "ai",
-        "confirmation_rule": "high-confidence-make",
-        "highlight_start": max(0, candidate.seconds - 4),
-        "highlight_end": min(duration or candidate.seconds + 5, candidate.seconds + 5),
-    }
+    # Automatic confirmation is intentionally disabled for the first team-only workflow.
+    return {"status": "pending", "points": None, "confirmed_at": None, "confirmed_by": None, "confirmation_rule": None, "highlight_start": None, "highlight_end": None}
 
 
 @app.get("/api/matches/{match_id}/workspace")
@@ -406,6 +396,34 @@ async def workspace(match_id: str) -> dict[str, Any]:
 @app.get("/api/matches/{match_id}/events")
 async def list_events(match_id: str) -> list[dict[str, Any]]:
     return (await workspace(match_id))["events"]
+
+
+@app.get("/api/matches/{match_id}/scoring")
+async def scoring(match_id: str) -> dict[str, Any]:
+    with db() as c:
+        require_match(match_id, c)
+        teams = {row["side"]: team_payload(row) for row in c.execute("SELECT * FROM teams WHERE match_id=?", (match_id,))}
+        events = [
+            event_payload(row, c)
+            for row in c.execute(
+                "SELECT e.* FROM analysis_events e JOIN clips cl ON cl.id=e.clip_id "
+                "WHERE cl.match_id=? AND e.event_type='make' ORDER BY e.seconds, e.id",
+                (match_id,),
+            )
+        ]
+        result: dict[str, Any] = {
+            "home": {"team": teams.get("home"), "events": []},
+            "away": {"team": teams.get("away"), "events": []},
+            "unassigned": [],
+        }
+        team_sides = {team["id"]: side for side, team in teams.items() if team.get("id")}
+        for event in events:
+            side = team_sides.get(event.get("teamId"))
+            if side in ("home", "away"):
+                result[side]["events"].append(event)
+            else:
+                result["unassigned"].append(event)
+        return result
 
 
 @app.get("/api/matches/{match_id}/players")
@@ -486,14 +504,17 @@ async def patch_event(event_id: str, data: EventPatch) -> dict[str, Any]:
         match_id = c.execute("SELECT match_id FROM clips WHERE id=?", (old["clip_id"],)).fetchone()[0]
         for key, table in (("player_id", "players"), ("team_id", "teams")):
             if key in values and values[key] is not None and not c.execute(f"SELECT id FROM {table} WHERE id=? AND match_id=?", (values[key], match_id)).fetchone(): raise HTTPException(422, f"{key} does not belong to match")
+        team_id = values["team_id"] if "team_id" in values else old["team_id"]
+        if status == "confirmed" and event_type == "make" and not team_id:
+            status = "pending"
         shot_type = values.get("shot_type", old["shot_type"])
         shot_type_source = "manual" if "shot_type" in values else old["shot_type_source"]
         points = values.get("points", old["points"])
-        if event_type == "attempt": points = None
+        if status != "confirmed" or event_type == "attempt": points = None
         elif "shot_type" in values and "points" not in values: points = shot_points(shot_type)
-        fields = {"status": status, "player_id": values["player_id"] if "player_id" in values else old["player_id"], "team_id": values["team_id"] if "team_id" in values else old["team_id"], "event_type": event_type, "shot_type": shot_type, "shot_type_source": shot_type_source, "points": points, "confirmed_at": now() if status == "confirmed" else old["confirmed_at"], "updated_at": now(), "highlight_start": max(0, old["seconds"] - 4) if status == "confirmed" and event_type == "make" else None, "highlight_end": min(clip["duration"] or old["seconds"] + 5, old["seconds"] + 5) if status == "confirmed" and event_type == "make" else None, "confirmed_by": "manual" if status == "confirmed" else None, "confirmation_rule": None}
+        fields = {"status": status, "player_id": values["player_id"] if "player_id" in values else old["player_id"], "team_id": team_id, "team_source": "manual" if "team_id" in values and team_id else ("unassigned" if "team_id" in values else old["team_source"]), "event_type": event_type, "shot_type": shot_type, "shot_type_source": shot_type_source, "points": points, "confirmed_at": now() if status == "confirmed" else None, "updated_at": now(), "highlight_start": max(0, old["seconds"] - 4) if status == "confirmed" and event_type == "make" else None, "highlight_end": min(clip["duration"] or old["seconds"] + 5, old["seconds"] + 5) if status == "confirmed" and event_type == "make" else None, "confirmed_by": "manual" if status == "confirmed" else None, "confirmation_rule": None}
         c.execute("INSERT INTO event_revisions VALUES(?,?,?,?,?)", (uuid.uuid4().hex, event_id, status, json.dumps(values), now()))
-        c.execute("UPDATE analysis_events SET status=?,player_id=?,team_id=?,event_type=?,shot_type=?,shot_type_source=?,points=?,confirmed_at=?,updated_at=?,highlight_start=?,highlight_end=?,confirmed_by=?,confirmation_rule=? WHERE id=?", (*fields.values(), event_id))
+        c.execute("UPDATE analysis_events SET status=?,player_id=?,team_id=?,team_source=?,event_type=?,shot_type=?,shot_type_source=?,points=?,confirmed_at=?,updated_at=?,highlight_start=?,highlight_end=?,confirmed_by=?,confirmation_rule=? WHERE id=?", (*fields.values(), event_id))
         updated = c.execute("SELECT * FROM analysis_events WHERE id=?", (event_id,)).fetchone()
         sample = None
         if status == "confirmed" and event_type == "make":
@@ -526,6 +547,8 @@ async def manual_event(match_id: str, data: ManualEvent) -> dict[str, Any]:
         start = max(0, data.seconds - 4) if data.type == "make" else None
         end = min(clip["duration"] or data.seconds + 5, data.seconds + 5) if data.type == "make" else None
         points = shot_points(data.shot_type) if data.type == "make" and data.shot_type else data.points
+        if data.type == "make" and not data.team_id:
+            raise HTTPException(422, "teamId is required for a confirmed make")
         c.execute("INSERT INTO analysis_events(id,clip_id,event_type,seconds,confidence,status,player_id,team_id,shot_type,shot_type_confidence,shot_type_source,points,source,highlight_start,highlight_end,updated_at,confirmed_at,confirmed_by) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", (event_id,data.clip_id,data.type,data.seconds,1,"confirmed",data.player_id,data.team_id,data.shot_type,1,"manual",points,"manual",start,end,now(),now(),"manual"))
         updated = c.execute("SELECT * FROM analysis_events WHERE id=?", (event_id,)).fetchone()
         payload = event_payload(updated, c)
