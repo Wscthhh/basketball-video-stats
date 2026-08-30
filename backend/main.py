@@ -18,6 +18,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, Field
 
 from .analyzer import BasketballAnalyzer, resolve_command
+from .team_classifier import classify as classify_team
 
 ROOT = Path(__file__).resolve().parent.parent
 DATA_DIR = ROOT / "data"
@@ -679,13 +680,8 @@ def cleanup_match_analysis(match_id: str) -> dict[str, int]:
         c.execute("UPDATE clips SET status='queued',confidence=0 WHERE match_id=?", (match_id,))
         return {"events": len(removable), "protectedEvents": len(protected), "tracks": len(track_rows), "players": len(player_rows), "runs": runs}
 def infer_team_id(c: sqlite3.Connection, match_id: str, rgb: tuple[float, float, float] | None) -> str | None:
-    teams = c.execute("SELECT id,color FROM teams WHERE match_id=? AND color IS NOT NULL", (match_id,)).fetchall()
-    if not rgb or len(teams) < 2:
-        return None
-    ranked = sorted((color_distance(rgb, team["color"]), team["id"]) for team in teams)
-    if ranked[0][0] < 0.7 and ranked[1][0] - ranked[0][0] >= 0.08:
-        return ranked[0][1]
-    return None
+    teams = [dict(row) for row in c.execute("SELECT id,color FROM teams WHERE match_id=? AND color IS NOT NULL", (match_id,)).fetchall()]
+    return classify_team(rgb, teams).team_id
 
 
 async def run_analysis(run_id: str, match_id: str, clip_ids: list[str], device: str) -> None:

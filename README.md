@@ -181,3 +181,15 @@ GET /api/matches/{match_id}/review-samples
 - [josephattalla/Basketball-Shot-Detection](https://github.com/josephattalla/Basketball-Shot-Detection)：MIT License，多篮球/篮筐跟踪和篮筐穿越判断。
 - [DeepSportradar/camera-calibration-challenge](https://github.com/DeepSportradar/camera-calibration-challenge)：FIBA 摄像机标定数据和球场线分割基线，数据使用遵循挑战与数据集条款。
 - [metacore-stack/RimPlane](https://github.com/metacore-stack/RimPlane)：球场区域和三分线几何参考；许可证禁止商业衍生使用，本项目只参考公开几何思想，不复制其实现。
+
+## 社区项目参考
+
+以下项目经过检索后作为实现参考，不作为当前项目的运行时依赖：
+
+- [lin-simon/NBAction](https://github.com/lin-simon/NBAction)：Apache-2.0，提供篮球动作分类、投篮/得分检测思路，并包含 `best.pt` 和测试视频。
+- [josephattalla/Basketball-Shot-Detection](https://github.com/josephattalla/Basketball-Shot-Detection)：MIT，提供篮球/篮筐轨迹、篮筐穿越和命中/未中判断。
+- [sketscripter/Computer-vision-basketball-court-mapping-and-player-tracking](https://github.com/sketscripter/Computer-vision-basketball-court-mapping-and-player-tracking)：Apache-2.0，提供球员球队分类与球场映射参考。
+- [Purgty/Basketball-Homography](https://github.com/Purgty/Basketball-Homography)：MIT，提供单应性、时序平滑和球员位置映射参考。
+- [rustyneuron01/Real-Time-Football-Detection](https://github.com/rustyneuron01/Real-Time-Football-Detection)：MIT，虽然是足球项目，但其 ReID、ByteTrack、球队分类和相机运动处理思路适用于篮球视频。
+
+检索时没有找到一个能直接覆盖“手机云台全场跟拍、球队归属、球员身份、投篮类型和完整技术统计”的成熟开源项目。因此当前实现采用多模型、轨迹、球队颜色和人工复核组合，不把社区项目的 Stars 或 Demo 结果当作准确率保证。

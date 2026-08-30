@@ -651,7 +651,8 @@ class BasketballAnalyzer:
             pixels = top[mask]
             if len(pixels) < 10:
                 pixels = top.reshape(-1, 3)
-            bgr = pixels.mean(axis=0)
+            # Median suppresses court lights, floor reflections and isolated background pixels.
+            bgr = __import__("numpy").median(pixels, axis=0)
             return float(bgr[2]), float(bgr[1]), float(bgr[0])
         except Exception:
             return None
