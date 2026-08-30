@@ -440,6 +440,16 @@ function eventLabel(type: string) {
   return ({ attempt: '投篮', make: '命中' } as Record<string, string>)[type] ?? '未知事件'
 }
 
+function eventTeam(event: EventRecord) {
+  const teamId = eventTeamId(event)
+  const team = workspace.value?.teams.find((item) => item.id === teamId)
+  return { id: teamId, name: team?.name || '未归属球队', color: team?.color || '#8a9490' }
+}
+
+function eventTeamSource(event: EventRecord) {
+  return event.teamId ? (event.confirmedBy === 'manual' ? '人工确认' : 'AI 归属') : event.playerId ? '由球员身份推断' : '待判断'
+}
+
 function shotTypeLabel(type?: ShotType | null) {
   return ({ freeThrow: '罚球', twoPoint: '两分', threePoint: '三分' } as Record<string, string>)[type ?? ''] ?? '待判断'
 }
@@ -596,6 +606,7 @@ onBeforeUnmount(stopPolling)
                   <small>{{ formatSeconds(event.seconds) }}</small>
                 </span>
                 <span class="team-highlight-copy">
+                  <small class="team-highlight-team"><i :style="{ background: eventTeam(event).color }"></i>{{ eventTeam(event).name }} · {{ eventTeamSource(event) }}</small>
                   <strong>{{ playerName(event.playerId) }}</strong>
                   <small>{{ event.status === 'confirmed' ? `${event.points ?? 0} 分` : 'AI 待确认' }} · {{ clips.find((clip) => clip.id === event.clipId)?.name || '源片段' }}</small>
                 </span>
@@ -641,6 +652,7 @@ onBeforeUnmount(stopPolling)
                         <label class="shot-type-input"><span>{{ shotTypeMeta(event) }}</span><select :value="event.shotType ?? ''" @change="updateEventFields(event, { shotType: (($event.target as HTMLSelectElement).value || null) as ShotType | null })"><option value="">待判断</option><option value="freeThrow">罚球 · 1分</option><option value="twoPoint">两分 · 2分</option><option value="threePoint">三分 · 3分</option></select></label>
                       </div>
                       <div class="event-item-bottom">
+                        <div class="event-team-badge" :class="{ unassigned: !eventTeam(event).id }"><i :style="{ background: eventTeam(event).color }"></i><span>{{ eventTeam(event).name }}</span><small>{{ eventTeamSource(event) }}</small></div>
                         <select :value="event.playerId ?? ''" @change="assignEvent(event, ($event.target as HTMLSelectElement).value)">
                           <option value="">未归属球员</option><option v-for="player in players" :key="player.id" :value="player.id">{{ playerDisplay(player) }}</option>
                         </select>
@@ -766,7 +778,7 @@ onBeforeUnmount(stopPolling)
           <div>
             <span class="panel-kicker">SCORING HIGHLIGHT</span>
             <h2 id="highlight-player-title">{{ playerName(activeHighlight.event.playerId) }} · {{ eventLabel(activeHighlight.event.type) }}</h2>
-            <p>{{ teamName(activeHighlight.event.teamId) }} · {{ shotTypeLabel(activeHighlight.event.shotType) }} · {{ activeHighlight.event.points ?? 0 }} 分 · {{ activeHighlight.clip.name }}</p>
+            <p><span class="player-team-inline"><i :style="{ background: eventTeam(activeHighlight.event).color }"></i>{{ eventTeam(activeHighlight.event).name }} · {{ eventTeamSource(activeHighlight.event) }}</span> · {{ shotTypeLabel(activeHighlight.event.shotType) }} · {{ activeHighlight.event.points ?? 0 }} 分 · {{ activeHighlight.clip.name }}</p>
           </div>
           <button class="icon-button dark" type="button" title="关闭" @click="closeHighlightPlayer"><X :size="18" /></button>
         </div>
