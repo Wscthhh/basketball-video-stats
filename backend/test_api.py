@@ -14,9 +14,17 @@ class ApiTest(unittest.TestCase):
     def setUp(self) -> None:
         self.temp = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
         self.old_upload_dir = main.UPLOAD_DIR
+        self.old_data_dir = main.DATA_DIR
+        self.old_covers_dir = main.COVERS_DIR
+        self.old_category_data_dir = main.CATEGORY_DATA_DIR
         main.DB_PATH = Path(self.temp.name) / "test.sqlite3"
-        main.UPLOAD_DIR = Path(self.temp.name) / "uploads"
+        main.DATA_DIR = Path(self.temp.name) / "data"
+        main.UPLOAD_DIR = main.DATA_DIR / "uploads"
+        main.COVERS_DIR = main.DATA_DIR / "covers"
+        main.CATEGORY_DATA_DIR = main.DATA_DIR / "training" / "review"
         main.UPLOAD_DIR.mkdir(parents=True)
+        main.COVERS_DIR.mkdir(parents=True)
+        main.CATEGORY_DATA_DIR.mkdir(parents=True)
         main.init_db()
         with main.db() as connection:
             connection.execute("INSERT INTO matches VALUES(?,?,?,?,?,?,?)", ("integration-test", "integration-test", None, None, "active", 1, main.now()))
@@ -27,6 +35,9 @@ class ApiTest(unittest.TestCase):
     def tearDown(self) -> None:
         self.client.close()
         main.UPLOAD_DIR = self.old_upload_dir
+        main.DATA_DIR = self.old_data_dir
+        main.COVERS_DIR = self.old_covers_dir
+        main.CATEGORY_DATA_DIR = self.old_category_data_dir
         self.temp.cleanup()
 
     def test_match_teams_workspace_and_test_filter(self) -> None:
@@ -110,6 +121,62 @@ class ApiTest(unittest.TestCase):
             connection.execute("UPDATE analysis_runs SET status='completed' WHERE id='active-run'")
         invalid = self.client.post(f"/api/matches/{match_id}/analyze", json={"clipIds": ["missing"], "device": "cpu"})
         self.assertEqual(invalid.status_code, 422)
+
+    def test_delete_clip_removes_relations_and_files_without_affecting_other_clip(self) -> None:
+        match_id = self.client.post("/api/matches", json={"name": "Delete", "homeTeam": {"name": "A"}, "awayTeam": {"name": "B"}}).json()["id"]
+        deleted_dir = main.UPLOAD_DIR / match_id / "delete-clip"
+        kept_dir = main.UPLOAD_DIR / match_id / "keep-clip"
+        deleted_dir.mkdir(parents=True)
+        kept_dir.mkdir(parents=True)
+        deleted_video = deleted_dir / "delete.mp4"
+        kept_video = kept_dir / "keep.mp4"
+        deleted_video.write_bytes(b"delete")
+        kept_video.write_bytes(b"keep")
+        deleted_cover = main.COVERS_DIR / match_id / "deleted-player.jpg"
+        kept_cover = main.COVERS_DIR / match_id / "shared-player.jpg"
+        deleted_cover.parent.mkdir(parents=True)
+        deleted_cover.write_bytes(b"delete cover")
+        kept_cover.write_bytes(b"keep cover")
+        analysis_dir = main.DATA_DIR / "analysis" / "run-1" / "delete-clip"
+        analysis_dir.mkdir(parents=True)
+        (analysis_dir / "result.json").write_text("{}", encoding="utf-8")
+        sample_dir = main.CATEGORY_DATA_DIR / match_id / "delete-sample"
+        sample_dir.mkdir(parents=True)
+        (sample_dir / "frame.jpg").write_bytes(b"frame")
+
+        with main.db() as c:
+            for clip_id, path, digest in (("delete-clip", deleted_video, "delete-hash"), ("keep-clip", kept_video, "keep-hash")):
+                c.execute("INSERT INTO clips(id,match_id,filename,stored_path,sha256,size_bytes,duration,status,confidence,created_at) VALUES(?,?,?,?,?,?,?,?,?,?)", (clip_id, match_id, path.name, str(path), digest, path.stat().st_size, 10, "review", 1, main.now()))
+            c.execute("INSERT INTO players(id,match_id,code,identity_type,status,cover_path,cover_source_clip_id) VALUES(?,?,?,?,?,?,?)", ("deleted-player", match_id, "tmp-delete", "temporary", "unconfirmed", str(deleted_cover), "delete-clip"))
+            c.execute("INSERT INTO players(id,match_id,code,identity_type,status,cover_path,cover_source_clip_id) VALUES(?,?,?,?,?,?,?)", ("shared-player", match_id, "tmp-shared", "temporary", "unconfirmed", str(kept_cover), "keep-clip"))
+            c.execute("INSERT INTO player_tracks(id,clip_id,player_id,local_track_key) VALUES(?,?,?,?)", ("delete-track", "delete-clip", "deleted-player", "delete-local"))
+            c.execute("INSERT INTO player_tracks(id,clip_id,player_id,local_track_key) VALUES(?,?,?,?)", ("shared-delete-track", "delete-clip", "shared-player", "shared-delete-local"))
+            c.execute("INSERT INTO player_tracks(id,clip_id,player_id,local_track_key) VALUES(?,?,?,?)", ("keep-track", "keep-clip", "shared-player", "keep-local"))
+            c.execute("INSERT INTO analysis_events(id,clip_id,event_type,seconds,confidence,status,player_id,source) VALUES(?,?,?,?,?,?,?,?)", ("delete-event", "delete-clip", "make", 1, .9, "confirmed", "deleted-player", "test"))
+            c.execute("INSERT INTO analysis_events(id,clip_id,event_type,seconds,confidence,status,player_id,source) VALUES(?,?,?,?,?,?,?,?)", ("keep-event", "keep-clip", "attempt", 2, .8, "pending", "shared-player", "test"))
+            c.execute("INSERT INTO event_revisions VALUES(?,?,?,?,?)", ("delete-revision", "delete-event", "confirmed", "{}", main.now()))
+            c.execute("INSERT INTO review_samples(id,match_id,clip_id,event_id,label,seconds,created_at) VALUES(?,?,?,?,?,?,?)", ("delete-sample", match_id, "delete-clip", "delete-event", "make", 1, main.now()))
+            c.execute("INSERT INTO analysis_runs(id,match_id,status,device,created_at,details_json) VALUES(?,?,?,?,?,?)", ("run-1", match_id, "completed", "cpu", main.now(), '{"clipIds":["delete-clip"]}'))
+
+        response = self.client.delete("/api/clips/delete-clip")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json(), {"id": "delete-clip", "deleted": True})
+        self.assertEqual(self.client.patch("/api/clips/delete-clip", json={}).status_code, 404)
+        self.assertEqual(self.client.delete("/api/clips/delete-clip").status_code, 404)
+        with main.db() as c:
+            for table, row_id in (("clips", "delete-clip"), ("analysis_events", "delete-event"), ("event_revisions", "delete-revision"), ("player_tracks", "delete-track"), ("review_samples", "delete-sample"), ("players", "deleted-player")):
+                self.assertIsNone(c.execute(f"SELECT 1 FROM {table} WHERE id=?", (row_id,)).fetchone())
+            self.assertIsNotNone(c.execute("SELECT 1 FROM clips WHERE id='keep-clip'").fetchone())
+            self.assertIsNotNone(c.execute("SELECT 1 FROM analysis_events WHERE id='keep-event'").fetchone())
+            self.assertIsNotNone(c.execute("SELECT 1 FROM player_tracks WHERE id='keep-track'").fetchone())
+            self.assertIsNotNone(c.execute("SELECT 1 FROM players WHERE id='shared-player'").fetchone())
+            self.assertIsNotNone(c.execute("SELECT 1 FROM analysis_runs WHERE id='run-1'").fetchone())
+        self.assertFalse(deleted_dir.exists())
+        self.assertFalse(analysis_dir.exists())
+        self.assertFalse(sample_dir.exists())
+        self.assertFalse(deleted_cover.exists())
+        self.assertTrue(kept_dir.exists())
+        self.assertTrue(kept_cover.exists())
 
     def test_cleanup_preserves_fixture_and_revised_confirmation(self) -> None:
         match_id = self.client.post("/api/matches", json={"name": "Cleanup", "homeTeam": {"name": "A"}, "awayTeam": {"name": "B"}}).json()["id"]

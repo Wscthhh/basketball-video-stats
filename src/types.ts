@@ -1,4 +1,4 @@
-export type TabKey = 'overview' | 'review' | 'players' | 'clips'
+export type TabKey = 'overview' | 'review' | 'clips'
 export type EventStatus = 'pending' | 'confirmed' | 'ignored'
 export type EventType = 'attempt' | 'make'
 export type ShotType = 'freeThrow' | 'twoPoint' | 'threePoint'
@@ -17,3 +17,4 @@ export interface StatRow { playerId: string | null; teamId?: string | null; name
 export interface Run { id: string; status?: string; progress?: number; completed?: number; total?: number; error?: string; details?: Record<string, unknown>; [key: string]: unknown }
 export interface Workspace { match: Match; teams: Team[]; players: Player[]; clips: Clip[]; events: EventRecord[]; stats: StatRow[]; runs: Run[] }
 export interface Health { analyzer?: { ready?: boolean; mode?: string; ocr?: { ready?: boolean; attempted?: boolean; error?: string }; models?: Record<string, { ready?: boolean; path?: string; task?: string; classes?: string[]; error?: string }> }; [key: string]: unknown }
+export interface CreateMatchDraft { name: string; playedAt: string; venue: string; homeName: string; homeColor: string; awayName: string; awayColor: string }

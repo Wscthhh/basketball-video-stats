@@ -21,4 +21,5 @@ export const api = {
   task: (id: string) => request<Run>(`/api/tasks/${encodeURIComponent(id)}`),
   updateEvent: (id: string, body: Pick<EventRecord, 'status'> & Partial<Pick<EventRecord, 'teamId' | 'playerId'>>) => request<EventRecord>(`/api/events/${encodeURIComponent(id)}`, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }),
   updateClipTeam: (id: string, teamId: string | null) => request<Clip>(`/api/clips/${encodeURIComponent(id)}`, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ teamId }) }),
+  deleteClip: (id: string) => request<{ id: string; deleted: boolean }>(`/api/clips/${encodeURIComponent(id)}`, { method: 'DELETE' }),
 }

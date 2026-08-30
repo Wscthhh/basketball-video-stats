@@ -307,6 +307,62 @@ async def patch_clip(clip_id: str, data: ClipPatch) -> dict[str, Any]:
         return clip_payload(c.execute("SELECT * FROM clips WHERE id=?", (clip_id,)).fetchone())
 
 
+@app.delete("/api/clips/{clip_id}")
+async def delete_clip(clip_id: str) -> dict[str, Any]:
+    paths_to_remove: set[Path] = set()
+    files_to_remove: set[Path] = set()
+    with db() as c:
+        c.execute("BEGIN IMMEDIATE")
+        clip = c.execute("SELECT match_id,stored_path FROM clips WHERE id=?", (clip_id,)).fetchone()
+        if not clip:
+            raise HTTPException(404, "clip not found")
+
+        stored_path = Path(clip["stored_path"])
+        if stored_path.parent.name == clip_id:
+            paths_to_remove.add(stored_path.parent)
+        else:
+            files_to_remove.add(stored_path)
+        analysis_root = DATA_DIR / "analysis"
+        if analysis_root.is_dir():
+            paths_to_remove.update(run_dir / clip_id for run_dir in analysis_root.iterdir() if (run_dir / clip_id).exists())
+
+        sample_rows = c.execute("SELECT id FROM review_samples WHERE clip_id=?", (clip_id,)).fetchall()
+        paths_to_remove.update(CATEGORY_DATA_DIR / clip["match_id"] / row["id"] for row in sample_rows)
+        affected_player_ids = {
+            row["player_id"] for row in c.execute("SELECT DISTINCT player_id FROM player_tracks WHERE clip_id=?", (clip_id,))
+        }
+        cover_rows = c.execute("SELECT id,cover_path FROM players WHERE cover_source_clip_id=?", (clip_id,)).fetchall()
+        affected_player_ids.update(row["id"] for row in cover_rows)
+        files_to_remove.update(Path(row["cover_path"]) for row in cover_rows if row["cover_path"])
+
+        c.execute("DELETE FROM review_samples WHERE clip_id=?", (clip_id,))
+        c.execute("DELETE FROM event_revisions WHERE event_id IN (SELECT id FROM analysis_events WHERE clip_id=?)", (clip_id,))
+        c.execute("DELETE FROM analysis_events WHERE clip_id=?", (clip_id,))
+        c.execute("DELETE FROM player_tracks WHERE clip_id=?", (clip_id,))
+        c.execute("UPDATE players SET cover_path=NULL,cover_score=NULL,cover_source_clip_id=NULL,cover_source_seconds=NULL WHERE cover_source_clip_id=?", (clip_id,))
+
+        if affected_player_ids:
+            marks = ",".join("?" for _ in affected_player_ids)
+            removable_players = c.execute(
+                f"SELECT id,cover_path FROM players WHERE id IN ({marks}) "
+                "AND identity_type IN ('temporary','unconfirmed') "
+                "AND NOT EXISTS (SELECT 1 FROM player_tracks WHERE player_tracks.player_id=players.id)",
+                list(affected_player_ids),
+            ).fetchall()
+            if removable_players:
+                removable_ids = [row["id"] for row in removable_players]
+                removable_marks = ",".join("?" for _ in removable_ids)
+                files_to_remove.update(Path(row["cover_path"]) for row in removable_players if row["cover_path"])
+                c.execute(f"DELETE FROM players WHERE id IN ({removable_marks})", removable_ids)
+        c.execute("DELETE FROM clips WHERE id=?", (clip_id,))
+
+    for path in paths_to_remove:
+        shutil.rmtree(path, ignore_errors=True)
+    for path in files_to_remove:
+        delete_cover_file(str(path))
+    return {"id": clip_id, "deleted": True}
+
+
 @app.get("/api/matches/{match_id}/clips/collections")
 async def clip_collections(match_id: str) -> dict[str, Any]:
     with db() as c:
