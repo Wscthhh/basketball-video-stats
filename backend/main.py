@@ -25,10 +25,12 @@ DATA_DIR = ROOT / "data"
 UPLOAD_DIR = DATA_DIR / "uploads"
 COVERS_DIR = DATA_DIR / "covers"
 CATEGORY_DATA_DIR = DATA_DIR / "training" / "review"
+CLIP_TEAM_DATA_DIR = DATA_DIR / "training" / "clip-team"
 DB_PATH = DATA_DIR / "courttrace.sqlite3"
 UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 COVERS_DIR.mkdir(parents=True, exist_ok=True)
 CATEGORY_DATA_DIR.mkdir(parents=True, exist_ok=True)
+CLIP_TEAM_DATA_DIR.mkdir(parents=True, exist_ok=True)
 app = FastAPI(title="COURTTRACE Local Analysis API", version="0.2.0")
 app.add_middleware(CORSMiddleware, allow_origins=["http://127.0.0.1:5173", "http://localhost:5173"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
 app.mount("/media", StaticFiles(directory=UPLOAD_DIR), name="media")
@@ -58,8 +60,9 @@ def init_db() -> None:
         CREATE TABLE IF NOT EXISTS player_tracks (id TEXT PRIMARY KEY, clip_id TEXT NOT NULL, player_id TEXT NOT NULL, local_track_key TEXT NOT NULL, team_id TEXT, confidence REAL NOT NULL DEFAULT 0, UNIQUE(clip_id, local_track_key), FOREIGN KEY(clip_id) REFERENCES clips(id), FOREIGN KEY(player_id) REFERENCES players(id));
         CREATE TABLE IF NOT EXISTS analysis_runs (id TEXT PRIMARY KEY, match_id TEXT NOT NULL, status TEXT NOT NULL, progress REAL NOT NULL DEFAULT 0, device TEXT NOT NULL, error TEXT NOT NULL DEFAULT '', started_at TEXT, finished_at TEXT, created_at TEXT NOT NULL, version TEXT NOT NULL DEFAULT '1', FOREIGN KEY(match_id) REFERENCES matches(id));
         CREATE TABLE IF NOT EXISTS event_revisions (id TEXT PRIMARY KEY, event_id TEXT NOT NULL, status TEXT NOT NULL, payload TEXT NOT NULL, created_at TEXT NOT NULL, FOREIGN KEY(event_id) REFERENCES analysis_events(id));
-        CREATE TABLE IF NOT EXISTS review_samples (id TEXT PRIMARY KEY, match_id TEXT NOT NULL, clip_id TEXT NOT NULL, event_id TEXT NOT NULL UNIQUE, label TEXT NOT NULL, shot_type TEXT, player_id TEXT, seconds REAL NOT NULL, metadata_json TEXT NOT NULL DEFAULT '{}', created_at TEXT NOT NULL, FOREIGN KEY(match_id) REFERENCES matches(id), FOREIGN KEY(clip_id) REFERENCES clips(id), FOREIGN KEY(event_id) REFERENCES analysis_events(id));
-        """)
+         CREATE TABLE IF NOT EXISTS review_samples (id TEXT PRIMARY KEY, match_id TEXT NOT NULL, clip_id TEXT NOT NULL, event_id TEXT NOT NULL UNIQUE, label TEXT NOT NULL, shot_type TEXT, player_id TEXT, seconds REAL NOT NULL, metadata_json TEXT NOT NULL DEFAULT '{}', created_at TEXT NOT NULL, FOREIGN KEY(match_id) REFERENCES matches(id), FOREIGN KEY(clip_id) REFERENCES clips(id), FOREIGN KEY(event_id) REFERENCES analysis_events(id));
+         CREATE TABLE IF NOT EXISTS clip_review_samples (id TEXT PRIMARY KEY, match_id TEXT NOT NULL, clip_id TEXT NOT NULL UNIQUE, team_id TEXT NOT NULL, label TEXT NOT NULL, frames_json TEXT NOT NULL DEFAULT '[]', metadata_json TEXT NOT NULL DEFAULT '{}', created_at TEXT NOT NULL, updated_at TEXT NOT NULL, FOREIGN KEY(match_id) REFERENCES matches(id), FOREIGN KEY(clip_id) REFERENCES clips(id), FOREIGN KEY(team_id) REFERENCES teams(id));
+         """)
         run_columns = {r["name"] for r in c.execute("PRAGMA table_info(analysis_runs)")}
         clip_columns = {r["name"] for r in c.execute("PRAGMA table_info(clips)")}
         for name, definition in {"team_id": "TEXT", "team_source": "TEXT", "team_confidence": "REAL NOT NULL DEFAULT 0", "team_evidence": "TEXT"}.items():
@@ -97,6 +100,20 @@ def init_db() -> None:
         if "team_id" not in review_columns:
             c.execute("ALTER TABLE review_samples ADD COLUMN team_id TEXT")
         c.execute("CREATE UNIQUE INDEX IF NOT EXISTS ux_event_fingerprint ON analysis_events(fingerprint) WHERE fingerprint IS NOT NULL")
+        clip_review_columns = {r["name"] for r in c.execute("PRAGMA table_info(clip_review_samples)")}
+        for name, definition in {
+            "match_id": "TEXT",
+            "clip_id": "TEXT",
+            "team_id": "TEXT",
+            "label": "TEXT",
+            "frames_json": "TEXT NOT NULL DEFAULT '[]'",
+            "metadata_json": "TEXT NOT NULL DEFAULT '{}'",
+            "created_at": "TEXT",
+            "updated_at": "TEXT",
+        }.items():
+            if name not in clip_review_columns:
+                c.execute(f"ALTER TABLE clip_review_samples ADD COLUMN {name} {definition}")
+        c.execute("CREATE UNIQUE INDEX IF NOT EXISTS ux_clip_review_samples_clip_id ON clip_review_samples(clip_id)")
         c.execute("UPDATE analysis_events SET event_type='attempt' WHERE event_type='投篮'")
         c.execute("UPDATE analysis_events SET event_type='make' WHERE event_type='命中'")
         c.execute("UPDATE analysis_events SET shot_type=CASE points WHEN 1 THEN 'freeThrow' WHEN 2 THEN 'twoPoint' WHEN 3 THEN 'threePoint' END WHERE event_type='make' AND shot_type IS NULL AND points IN (1,2,3)")
@@ -149,6 +166,30 @@ def clip_payload(row: sqlite3.Row) -> dict[str, Any]:
     value["name"] = row["filename"]
     value["previewUrl"] = f"/media/{row['match_id']}/{row['id']}/{row['filename']}"
     return value
+
+
+def capture_clip_team_sample(clip: sqlite3.Row, sample_dir: Path) -> list[str]:
+    frames: list[str] = []
+    sample_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        import cv2
+        capture = cv2.VideoCapture(str(clip["stored_path"]))
+        frame_count = int(capture.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
+        if frame_count <= 0:
+            capture.release()
+            return frames
+        for index, ratio in enumerate((0.0, 0.5, 0.9)):
+            capture.set(cv2.CAP_PROP_POS_FRAMES, min(frame_count - 1, int(frame_count * ratio)))
+            ok, frame = capture.read()
+            if not ok:
+                continue
+            frame_path = sample_dir / f"frame-{index:02d}.jpg"
+            if cv2.imwrite(str(frame_path), frame, [int(cv2.IMWRITE_JPEG_QUALITY), 92]):
+                frames.append(str(frame_path.relative_to(DATA_DIR)))
+        capture.release()
+    except Exception:
+        frames = []
+    return frames
 
 
 def run_payload(row: sqlite3.Row) -> dict[str, Any]:
@@ -290,6 +331,7 @@ async def list_clips(match_id: str) -> list[dict[str, Any]]:
 
 @app.patch("/api/clips/{clip_id}")
 async def patch_clip(clip_id: str, data: ClipPatch) -> dict[str, Any]:
+    sample_dir_to_remove: Path | None = None
     with db() as c:
         clip = c.execute("SELECT * FROM clips WHERE id=?", (clip_id,)).fetchone()
         if not clip:
@@ -302,9 +344,29 @@ async def patch_clip(clip_id: str, data: ClipPatch) -> dict[str, Any]:
             raise HTTPException(422, "team does not belong to match")
         if team_id is None:
             c.execute("UPDATE clips SET team_id=NULL,team_source='unresolved',team_confidence=0,team_evidence='无法从片段可靠判断球队' WHERE id=?", (clip_id,))
+            if c.execute("DELETE FROM clip_review_samples WHERE clip_id=?", (clip_id,)).rowcount:
+                sample_dir_to_remove = CLIP_TEAM_DATA_DIR / clip["match_id"] / clip_id
         else:
             c.execute("UPDATE clips SET team_id=?,team_source='manual',team_confidence=1,team_evidence='手动指定球队' WHERE id=?", (team_id, clip_id))
-        return clip_payload(c.execute("SELECT * FROM clips WHERE id=?", (clip_id,)).fetchone())
+            team = c.execute("SELECT side FROM teams WHERE id=?", (team_id,)).fetchone()
+            sample_dir = CLIP_TEAM_DATA_DIR / clip["match_id"] / clip_id
+            shutil.rmtree(sample_dir, ignore_errors=True)
+            frames = capture_clip_team_sample(clip, sample_dir)
+            timestamp = now()
+            metadata = {"source": "manual", "clipFilename": clip["filename"], "duration": clip["duration"]}
+            c.execute(
+                """INSERT INTO clip_review_samples
+                (id,match_id,clip_id,team_id,label,frames_json,metadata_json,created_at,updated_at)
+                VALUES(?,?,?,?,?,?,?,?,?)
+                ON CONFLICT(clip_id) DO UPDATE SET team_id=excluded.team_id,label=excluded.label,
+                frames_json=excluded.frames_json,metadata_json=excluded.metadata_json,updated_at=excluded.updated_at""",
+                (uuid.uuid4().hex, clip["match_id"], clip_id, team_id,
+                 f"team_{team['side']}", json.dumps(frames), json.dumps(metadata), timestamp, timestamp),
+            )
+        result = clip_payload(c.execute("SELECT * FROM clips WHERE id=?", (clip_id,)).fetchone())
+    if sample_dir_to_remove:
+        shutil.rmtree(sample_dir_to_remove, ignore_errors=True)
+    return result
 
 
 @app.delete("/api/clips/{clip_id}")
@@ -328,6 +390,8 @@ async def delete_clip(clip_id: str) -> dict[str, Any]:
 
         sample_rows = c.execute("SELECT id FROM review_samples WHERE clip_id=?", (clip_id,)).fetchall()
         paths_to_remove.update(CATEGORY_DATA_DIR / clip["match_id"] / row["id"] for row in sample_rows)
+        if c.execute("SELECT 1 FROM clip_review_samples WHERE clip_id=?", (clip_id,)).fetchone():
+            paths_to_remove.add(CLIP_TEAM_DATA_DIR / clip["match_id"] / clip_id)
         affected_player_ids = {
             row["player_id"] for row in c.execute("SELECT DISTINCT player_id FROM player_tracks WHERE clip_id=?", (clip_id,))
         }
@@ -336,6 +400,7 @@ async def delete_clip(clip_id: str) -> dict[str, Any]:
         files_to_remove.update(Path(row["cover_path"]) for row in cover_rows if row["cover_path"])
 
         c.execute("DELETE FROM review_samples WHERE clip_id=?", (clip_id,))
+        c.execute("DELETE FROM clip_review_samples WHERE clip_id=?", (clip_id,))
         c.execute("DELETE FROM event_revisions WHERE event_id IN (SELECT id FROM analysis_events WHERE clip_id=?)", (clip_id,))
         c.execute("DELETE FROM analysis_events WHERE clip_id=?", (clip_id,))
         c.execute("DELETE FROM player_tracks WHERE clip_id=?", (clip_id,))
@@ -681,6 +746,20 @@ async def review_samples(match_id: str) -> list[dict[str, Any]]:
         result = []
         for row in rows:
             value = camel(row)
+            value["metadata"] = json.loads(row["metadata_json"] or "{}")
+            result.append(value)
+        return result
+
+
+@app.get("/api/matches/{match_id}/clip-review-samples")
+async def clip_review_samples(match_id: str) -> list[dict[str, Any]]:
+    with db() as c:
+        require_match(match_id, c)
+        rows = c.execute("SELECT * FROM clip_review_samples WHERE match_id=? ORDER BY created_at DESC", (match_id,)).fetchall()
+        result = []
+        for row in rows:
+            value = camel(row)
+            value["frames"] = json.loads(row["frames_json"] or "[]")
             value["metadata"] = json.loads(row["metadata_json"] or "{}")
             result.append(value)
         return result

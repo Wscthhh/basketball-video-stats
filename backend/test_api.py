@@ -1,4 +1,6 @@
 import asyncio
+import json
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -17,14 +19,17 @@ class ApiTest(unittest.TestCase):
         self.old_data_dir = main.DATA_DIR
         self.old_covers_dir = main.COVERS_DIR
         self.old_category_data_dir = main.CATEGORY_DATA_DIR
+        self.old_clip_team_data_dir = main.CLIP_TEAM_DATA_DIR
         main.DB_PATH = Path(self.temp.name) / "test.sqlite3"
         main.DATA_DIR = Path(self.temp.name) / "data"
         main.UPLOAD_DIR = main.DATA_DIR / "uploads"
         main.COVERS_DIR = main.DATA_DIR / "covers"
         main.CATEGORY_DATA_DIR = main.DATA_DIR / "training" / "review"
+        main.CLIP_TEAM_DATA_DIR = main.DATA_DIR / "training" / "clip-team"
         main.UPLOAD_DIR.mkdir(parents=True)
         main.COVERS_DIR.mkdir(parents=True)
         main.CATEGORY_DATA_DIR.mkdir(parents=True)
+        main.CLIP_TEAM_DATA_DIR.mkdir(parents=True)
         main.init_db()
         with main.db() as connection:
             connection.execute("INSERT INTO matches VALUES(?,?,?,?,?,?,?)", ("integration-test", "integration-test", None, None, "active", 1, main.now()))
@@ -38,6 +43,7 @@ class ApiTest(unittest.TestCase):
         main.DATA_DIR = self.old_data_dir
         main.COVERS_DIR = self.old_covers_dir
         main.CATEGORY_DATA_DIR = self.old_category_data_dir
+        main.CLIP_TEAM_DATA_DIR = self.old_clip_team_data_dir
         self.temp.cleanup()
 
     def test_match_teams_workspace_and_test_filter(self) -> None:
@@ -211,6 +217,90 @@ class ApiTest(unittest.TestCase):
         ids = [clip["id"] for side in ("home", "away") for clip in result[side]["clips"]] + [clip["id"] for clip in result["unresolved"]]
         self.assertEqual(set(ids), {"home-clip", "away-clip", "unresolved-clip"})
         self.assertEqual(result["home"]["clips"][0]["teamSource"], "manual")
+
+    def test_clip_team_review_sample_confirm_update_clear_and_list(self) -> None:
+        match_id = self.client.post("/api/matches", json={"name": "Clip review", "homeTeam": {"name": "Home"}, "awayTeam": {"name": "Away"}}).json()["id"]
+        video = main.DATA_DIR / "source.mp4"
+        video.write_bytes(b"not-a-video")
+        with main.db() as c:
+            c.execute(
+                "INSERT INTO clips(id,match_id,filename,stored_path,sha256,size_bytes,duration,status,confidence,created_at) VALUES(?,?,?,?,?,?,?,?,?,?)",
+                ("review-clip", match_id, "source.mp4", str(video), "review-hash", video.stat().st_size, 12.5, "review", 1, main.now()),
+            )
+
+        class FakeCapture:
+            def __init__(self, *_args):
+                self.positions = []
+
+            def get(self, property_id):
+                return 10 if property_id == 7 else 0
+
+            def set(self, property_id, position):
+                self.positions.append(position)
+
+            def read(self):
+                return True, b"fake-frame"
+
+            def release(self):
+                pass
+
+        class FakeCV2:
+            CAP_PROP_FRAME_COUNT = 7
+            CAP_PROP_POS_FRAMES = 1
+            IMWRITE_JPEG_QUALITY = 1
+
+            @staticmethod
+            def VideoCapture(path):
+                return FakeCapture(path)
+
+            @staticmethod
+            def imwrite(path, frame, _params):
+                Path(path).write_bytes(frame)
+                return True
+
+        home_id, away_id = f"{match_id}-home", f"{match_id}-away"
+        with patch.dict(sys.modules, {"cv2": FakeCV2}):
+            first = self.client.patch("/api/clips/review-clip", json={"teamId": home_id})
+        self.assertEqual(first.status_code, 200)
+        self.assertEqual(first.json()["teamSource"], "manual")
+        with main.db() as c:
+            sample = c.execute("SELECT * FROM clip_review_samples WHERE clip_id='review-clip'").fetchone()
+            frames = json.loads(sample["frames_json"])
+            self.assertEqual((sample["label"], len(frames), json.loads(sample["metadata_json"])["source"]), ("team_home", 3, "manual"))
+            self.assertTrue(all((main.DATA_DIR / path).exists() for path in frames))
+            sample_id = sample["id"]
+        self.assertEqual(self.client.patch("/api/clips/review-clip", json={"teamId": away_id}).status_code, 200)
+        with main.db() as c:
+            samples = c.execute("SELECT id,team_id,label FROM clip_review_samples WHERE clip_id='review-clip'").fetchall()
+            self.assertEqual(len(samples), 1)
+            self.assertEqual(samples[0]["id"], sample_id)
+            self.assertEqual((samples[0]["team_id"], samples[0]["label"]), (away_id, "team_away"))
+        listed = self.client.get(f"/api/matches/{match_id}/clip-review-samples")
+        self.assertEqual(listed.status_code, 200)
+        self.assertEqual(listed.json()[0]["metadata"]["clipFilename"], "source.mp4")
+        self.assertEqual(self.client.patch("/api/clips/review-clip", json={"teamId": None}).status_code, 200)
+        with main.db() as c:
+            self.assertIsNone(c.execute("SELECT 1 FROM clip_review_samples WHERE clip_id='review-clip'").fetchone())
+        self.assertFalse((main.CLIP_TEAM_DATA_DIR / match_id / "review-clip").exists())
+
+    def test_delete_clip_removes_clip_team_review_sample(self) -> None:
+        match_id = self.client.post("/api/matches", json={"name": "Delete clip sample", "homeTeam": {"name": "A"}, "awayTeam": {"name": "B"}}).json()["id"]
+        sample_dir = main.CLIP_TEAM_DATA_DIR / match_id / "sample-clip"
+        sample_dir.mkdir(parents=True)
+        (sample_dir / "frame-00.jpg").write_bytes(b"frame")
+        with main.db() as c:
+            c.execute(
+                "INSERT INTO clips(id,match_id,filename,stored_path,sha256,size_bytes,duration,status,confidence,created_at) VALUES(?,?,?,?,?,?,?,?,?,?)",
+                ("sample-clip", match_id, "x.mp4", "x.mp4", "sample-hash", 1, 1, "review", 1, main.now()),
+            )
+            c.execute(
+                "INSERT INTO clip_review_samples(id,match_id,clip_id,team_id,label,frames_json,metadata_json,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?)",
+                ("sample-row", match_id, "sample-clip", f"{match_id}-home", "team_home", "[]", "{}", main.now(), main.now()),
+            )
+        self.assertEqual(self.client.delete("/api/clips/sample-clip").status_code, 200)
+        with main.db() as c:
+            self.assertIsNone(c.execute("SELECT 1 FROM clip_review_samples WHERE id='sample-row'").fetchone())
+        self.assertFalse(sample_dir.exists())
 
     def test_manual_clip_team_survives_analysis(self) -> None:
         match_id = self.client.post("/api/matches", json={"name": "Manual team", "homeTeam": {"name": "Home", "color": "#ff0000"}, "awayTeam": {"name": "Away", "color": "#0000ff"}}).json()["id"]

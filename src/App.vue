@@ -201,18 +201,32 @@ function closeClip() {
   activeClipId.value = ''
 }
 
-async function setClipTeam(teamId: string | null) {
-  if (!activeClip.value || busy.value) return
+async function setClipTeam(teamId: string | null): Promise<boolean> {
+  if (!activeClip.value || busy.value) return false
   busy.value = true
   try {
     await api.updateClipTeam(activeClip.value.id, teamId)
     await refresh()
+    return true
   } catch (error) {
     fail(error)
+    return false
   } finally {
     busy.value = false
   }
 }
+
+async function confirmClipTeam(teamId: string | null) {
+  if (await setClipTeam(teamId)) closeClip()
+}
+
+async function reassignClipTeam(teamId: string | null) {
+  if (await setClipTeam(teamId)) closeClip()
+}
+
+function startReassign() {}
+
+function cancelReassign() {}
 
 async function deleteActiveClip() {
   const clip = activeClip.value
@@ -253,6 +267,6 @@ onBeforeUnmount(stopPolling)
 
     <CreateMatchModal v-if="showCreate" v-model:draft="createDraft" :busy="busy" @close="showCreate = false" @submit="createMatch" />
     <ImportClipsModal v-if="showImport" :files="pendingFiles" :busy="busy" @close="showImport = false" @select-files="pendingFiles = $event" @upload="upload" />
-    <ClipPreviewModal v-if="activeClip" :clip="activeClip" :home-team="homeTeam" :away-team="awayTeam" :busy="busy" @close="closeClip" @assign-team="setClipTeam" @delete-clip="deleteActiveClip" />
+    <ClipPreviewModal v-if="activeClip" :clip="activeClip" :home-team="homeTeam" :away-team="awayTeam" :busy="busy" @close="closeClip" @confirm-team="confirmClipTeam" @save-team="reassignClipTeam" @start-reassign="startReassign" @cancel-reassign="cancelReassign" @delete-clip="deleteActiveClip" />
   </div>
 </template>

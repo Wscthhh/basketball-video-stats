@@ -5,7 +5,7 @@ export type ShotType = 'freeThrow' | 'twoPoint' | 'threePoint'
 
 export interface Team { id?: string; name: string; color: string; side?: 'home' | 'away' }
 export interface Match { id: string; name: string; playedAt?: string; venue?: string; isTest?: boolean; homeTeam: Team; awayTeam: Team }
-export interface Clip { id: string; name: string; sequence?: number; durationSeconds?: number; duration?: number; status?: string; confidence?: number; createdAt?: string; sizeBytes?: number; previewUrl?: string; teamId?: string | null; teamSource?: 'ai' | 'manual' | 'unresolved' | string; teamConfidence?: number; teamEvidence?: string }
+export interface Clip { id: string; name: string; sequence?: number; durationSeconds?: number; duration?: number; status?: string; confidence?: number; createdAt?: string; sizeBytes?: number; previewUrl?: string; teamId?: string | null; teamConfirmed?: boolean; teamSource?: 'ai' | 'manual' | 'unresolved' | string; teamConfidence?: number; teamEvidence?: string }
 export interface ClipCollection { team?: Team; clips: Clip[] }
 export interface ClipCollections { home: ClipCollection; away: ClipCollection; unresolved: Clip[] }
 export interface Player { id: string; name: string; displayName?: string; coverUrl?: string | null; number?: string | null; numberConfidence?: number; numberSource?: string | null; numberCandidates?: Array<{ number: string; votes: number; confidence: number }>; code?: string; teamId?: string | null; team?: 'home' | 'away'; identityType?: string; color?: string | null; confidence?: number; tracks?: number; tracksCount?: number; status?: string }
