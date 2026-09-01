@@ -32,6 +32,7 @@
     "directories": {
       "output": "release"
     },
+    "compression": "store",
     "files": [
       "dist/**/*",
       "electron/**/*",
@@ -68,7 +69,8 @@
       "oneClick": true,
       "perMachine": false,
       "createDesktopShortcut": true,
-      "createStartMenuShortcut": true
+      "createStartMenuShortcut": true,
+      "compression": "store"
     }
   }
 }
