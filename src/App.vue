@@ -37,9 +37,9 @@ const createDraft = ref<CreateMatchDraft>({
   playedAt: '',
   venue: '',
   homeName: '',
-  homeColor: '#F4F5F0',
+  homeColor: '#171A18',
   awayName: '',
-  awayColor: '#171A18',
+  awayColor: '#F4F5F0',
 })
 
 const clips = computed(() => workspace.value?.clips ?? [])
@@ -200,10 +200,11 @@ async function analyze(clipIds = clips.value.filter((clip) => ['queued', 'failed
 }
 
 async function reanalyzeAll() {
-  if (!match.value || !clips.value.length || busy.value) return
+  const reanalyzeClips = clips.value.filter((clip) => clip.teamSource !== 'manual')
+  if (!match.value || !reanalyzeClips.length || busy.value) return
   busy.value = true
   try {
-    await analyze(clips.value.map((clip) => clip.id))
+    await analyze(reanalyzeClips.map((clip) => clip.id))
   } finally {
     busy.value = false
   }

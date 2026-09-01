@@ -1184,15 +1184,20 @@ async def analyze(match_id: str, request: AnalyzeRequest) -> dict[str, Any]:
             raise HTTPException(409, f"analysis already running: {active['id']}")
         if request.clip_ids:
             marks = ",".join("?" for _ in request.clip_ids)
-            rows = c.execute(f"SELECT cl.id,cl.status FROM clips cl WHERE cl.match_id=? AND cl.id IN ({marks})", [match_id,*request.clip_ids]).fetchall()
+            rows = c.execute(f"SELECT cl.id,cl.status,cl.team_source FROM clips cl WHERE cl.match_id=? AND cl.id IN ({marks})", [match_id,*request.clip_ids]).fetchall()
             if len(rows) != len(set(request.clip_ids)):
                 raise HTTPException(422, "one or more clipIds do not belong to this match")
-            active_processing = c.execute(f"SELECT DISTINCT cl.id FROM clips cl JOIN analysis_runs ar ON ar.match_id=cl.match_id AND ar.status='running' WHERE cl.match_id=? AND cl.id IN ({marks}) AND cl.status='processing'", [match_id,*request.clip_ids]).fetchall()
+            clip_ids = [r["id"] for r in rows if r["team_source"] != "manual"]
+            active_marks = ",".join("?" for _ in clip_ids)
+            active_processing = c.execute(f"SELECT DISTINCT cl.id FROM clips cl WHERE cl.match_id=? AND cl.id IN ({active_marks}) AND cl.status='processing'", [match_id,*clip_ids]).fetchall() if clip_ids else []
             if active_processing:
                 raise HTTPException(409, "one or more clips are already processing")
-            c.execute(f"UPDATE clips SET status='queued' WHERE match_id=? AND id IN ({marks}) AND status='processing'", [match_id,*request.clip_ids])
-        else: rows = c.execute("SELECT id FROM clips WHERE match_id=? AND status IN ('queued','failed','interrupted')", (match_id,)).fetchall()
-        clip_ids = [r["id"] for r in rows]; run_id = uuid.uuid4().hex; selected = "cuda" if cuda_available() and request.device != "cpu" else "cpu"
+            if clip_ids:
+                c.execute(f"UPDATE clips SET status='queued' WHERE match_id=? AND id IN ({active_marks}) AND status='processing'", [match_id,*clip_ids])
+        else:
+            rows = c.execute("SELECT id FROM clips WHERE match_id=? AND status IN ('queued','failed','interrupted') AND team_source != 'manual'", (match_id,)).fetchall()
+            clip_ids = [r["id"] for r in rows]
+        run_id = uuid.uuid4().hex; selected = "cuda" if cuda_available() and request.device != "cpu" else "cpu"
         c.execute("INSERT INTO analysis_runs(id,match_id,status,device,total_clips,completed_clips,details_json,created_at,started_at) VALUES(?,?,?,?,?,?,?,?,?)", (run_id,match_id,"completed" if not clip_ids else "running",selected,len(clip_ids),0,"{}",now(),now()))
         if clip_ids:
             marks = ",".join("?" for _ in clip_ids)
