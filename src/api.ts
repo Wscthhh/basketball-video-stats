@@ -9,7 +9,14 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
     try { detail = (await response.json()).detail ?? detail } catch { /* non JSON error */ }
     throw new Error(detail)
   }
-  return response.json() as Promise<T>
+  const value = await response.json()
+  return normalizeApiUrls(value, base) as T
+}
+
+function normalizeApiUrls(value: unknown, base: string): unknown {
+  if (Array.isArray(value)) return value.map((item) => normalizeApiUrls(item, base))
+  if (!value || typeof value !== 'object') return value
+  return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, typeof item === 'string' && (key.endsWith('Url') || key === 'previewUrl') && item.startsWith('/') ? `${base}${item}` : normalizeApiUrls(item, base)]))
 }
 
 export const api = {
@@ -24,7 +31,7 @@ export const api = {
   updateEvent: (id: string, body: Pick<EventRecord, 'status'> & Partial<Pick<EventRecord, 'teamId' | 'playerId'>>) => request<EventRecord>(`/api/events/${encodeURIComponent(id)}`, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }),
   updateClipTeam: (id: string, teamId: string | null) => request<Clip>(`/api/clips/${encodeURIComponent(id)}`, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ teamId }) }),
   deleteClip: (id: string) => request<{ id: string; deleted: boolean }>(`/api/clips/${encodeURIComponent(id)}`, { method: 'DELETE' }),
-  downloadClipUrl: (id: string) => `/api/clips/${encodeURIComponent(id)}/download`,
+  downloadClipUrl: (id: string) => { const desktop = (window as Window & { courtTraceDesktop?: { apiBase?: string } }).courtTraceDesktop; const base = desktop?.apiBase || (window as Window & { __COURTTRACE_API__?: string }).__COURTTRACE_API__ || ''; return `${base}/api/clips/${encodeURIComponent(id)}/download` },
   teamHighlights: (id: string) => request<TeamHighlightExport[]>(`/api/matches/${encodeURIComponent(id)}/team-highlights`),
   generateTeamHighlight: (matchId: string, teamId: string) => request<TeamHighlightExport>(`/api/matches/${encodeURIComponent(matchId)}/team-highlights/${encodeURIComponent(teamId)}/generate`, { method: 'POST' }),
   teamTrainingStatus: (id: string) => request<TeamTrainingStatus>(`/api/matches/${encodeURIComponent(id)}/team-classifier/training-status`),
