@@ -74,6 +74,14 @@ class ApiTest(unittest.TestCase):
         status = self.client.get(f"/api/matches/{match_id}/team-classifier/training-status")
         self.assertEqual((status.status_code, status.json()["ready"], status.json()["suggestion"]), (200, False, False))
 
+    def test_interrupted_processing_clips_are_requeued(self) -> None:
+        match_id = self.client.post("/api/matches", json={"name": "Recovery", "homeTeam": {"name": "Home"}, "awayTeam": {"name": "Away"}}).json()["id"]
+        with main.db() as c:
+            c.execute("INSERT INTO clips(id,match_id,filename,stored_path,sha256,size_bytes,created_at,status) VALUES(?,?,?,?,?,?,?,?)", ("stale-clip", match_id, "x.mp4", "x.mp4", "stale-hash", 1, main.now(), "processing"))
+        main.init_db()
+        with main.db() as c:
+            self.assertEqual(c.execute("SELECT status FROM clips WHERE id='stale-clip'").fetchone()["status"], "queued")
+
     def test_stats_merge_and_explicit_clear(self) -> None:
         match_id = self.client.post("/api/matches", json={"name": "Stats", "homeTeam": {"name": "A"}, "awayTeam": {"name": "B"}}).json()["id"]
         with main.db() as c:
