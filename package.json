@@ -11,7 +11,8 @@
     "preview": "vite preview",
     "desktop:prepare": "powershell -ExecutionPolicy Bypass -File scripts/build-desktop.ps1",
     "desktop:build": "npm run desktop:prepare && npm run build",
-    "desktop:package": "npm run desktop:build && electron-builder --win nsis"
+    "desktop:package": "npm run desktop:build && electron-builder --win nsis",
+    "desktop:inno": "npm run build && powershell -ExecutionPolicy Bypass -File scripts/build-inno.ps1"
   },
   "dependencies": {
     "lucide-vue-next": "^0.468.0",
@@ -69,7 +70,8 @@
       "oneClick": true,
       "perMachine": false,
       "createDesktopShortcut": true,
-      "createStartMenuShortcut": true
+      "createStartMenuShortcut": true,
+      "useZip": true
     }
   }
 }
