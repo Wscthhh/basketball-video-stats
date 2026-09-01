@@ -236,5 +236,20 @@ class ReanalysisTest(unittest.TestCase):
                 main.DB_PATH = old_path
 
 
+class EventTeamAttributionTest(unittest.TestCase):
+    def test_event_team_attribution_uses_shooter_track_not_player_identity(self) -> None:
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as directory:
+            old_path = main.DB_PATH
+            main.DB_PATH = Path(directory) / "event-team.sqlite3"
+            main.init_db()
+            with main.db() as connection:
+                connection.execute("INSERT INTO matches VALUES(?,?,?,?,?,?,?)", ("match", "Match", None, None, "active", 0, main.now()))
+                connection.execute("INSERT INTO teams(id,match_id,side,name,color) VALUES(?,?,?,?,?)", ("home", "match", "home", "Home", "#d73a3a"))
+                connection.execute("INSERT INTO teams(id,match_id,side,name,color) VALUES(?,?,?,?,?)", ("away", "match", "away", "Away", "#3267d6"))
+                result = main.infer_event_team(connection, "match", TrackCandidate("local-001", .9, 8, jersey_rgb=(208, 48, 48)))
+            main.DB_PATH = old_path
+        self.assertEqual(result[0], "home")
+
+
 if __name__ == "__main__":
     unittest.main()

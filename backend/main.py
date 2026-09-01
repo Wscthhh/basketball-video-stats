@@ -1047,16 +1047,14 @@ def infer_team_id(c: sqlite3.Connection, match_id: str, rgb: tuple[float, float,
     return classify_team(rgb, teams, learned_team_prototypes(c, match_id)).team_id
 
 
-def infer_event_team(c: sqlite3.Connection, match_id: str, track: Any, player_team_id: str | None) -> tuple[str | None, float, str]:
+def infer_event_team(c: sqlite3.Connection, match_id: str, track: Any) -> tuple[str | None, float, str]:
     teams = [dict(row) for row in c.execute("SELECT id,color FROM teams WHERE match_id=? AND color IS NOT NULL", (match_id,)).fetchall()]
     if not track or track.jersey_rgb is None or not teams:
-        return player_team_id, 0, "缺少出手球员球衣颜色证据"
+        return None, 0, "缺少出手轨迹球衣颜色证据"
     decision = classify_team(track.jersey_rgb, teams, learned_team_prototypes(c, match_id))
     if decision.team_id is None:
-        return player_team_id, decision.confidence, "出手球员球衣颜色无法区分球队"
-    if player_team_id and player_team_id != decision.team_id:
-        return None, 0, "出手球员身份与球衣颜色球队判断冲突"
-    return decision.team_id, decision.confidence, f"出手轨迹 {track.local_track_key} 的球衣颜色匹配球队"
+        return None, decision.confidence, "出手轨迹球衣颜色无法区分球队"
+    return decision.team_id, decision.confidence, f"出手轨迹 {track.local_track_key} 的多帧球衣颜色匹配球队"
 
 
 async def run_analysis(run_id: str, match_id: str, clip_ids: list[str], device: str) -> None:
@@ -1132,10 +1130,8 @@ async def run_analysis(run_id: str, match_id: str, clip_ids: list[str], device: 
                     fingerprint = f"{clip_id}/{event_type}/{int(candidate.seconds/0.2)}/{candidate.source}"
                     existing = c.execute("SELECT * FROM analysis_events WHERE fingerprint=?", (fingerprint,)).fetchone()
                     player_id = track_players.get(candidate.local_track_key)
-                    event_team_id = c.execute("SELECT team_id FROM players WHERE id=?", (player_id,)).fetchone() if player_id else None
-                    player_team_id = event_team_id["team_id"] if event_team_id else None
                     shooter_track = next((track for track in inspection.tracks if track.local_track_key == candidate.local_track_key), None)
-                    inferred_team_id, team_confidence, team_evidence = infer_event_team(c, match_id, shooter_track, player_team_id)
+                    inferred_team_id, team_confidence, team_evidence = infer_event_team(c, match_id, shooter_track)
                     confirmation = automatic_confirmation(candidate, player_id, inferred_team_id, clip["duration"])
                     if existing and (existing["confirmed_by"] == "manual" or existing["status"] == "ignored"):
                         continue
