@@ -14,3 +14,4 @@ data/covers/
 
 # Model weights are stored in this private repository through Git LFS.
 datasets/
+release/

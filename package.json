@@ -2,11 +2,16 @@
   "name": "courttrace",
   "private": true,
   "version": "0.1.0",
+  "description": "COURTTRACE local basketball video analysis desktop app",
+  "author": "COURTTRACE",
   "type": "module",
   "scripts": {
     "dev": "vite",
     "build": "vue-tsc -b && vite build",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "desktop:prepare": "powershell -ExecutionPolicy Bypass -File scripts/build-desktop.ps1",
+    "desktop:build": "npm run desktop:prepare && npm run build",
+    "desktop:package": "npm run desktop:build && electron-builder --win nsis"
   },
   "dependencies": {
     "lucide-vue-next": "^0.468.0",
@@ -14,8 +19,56 @@
   },
   "devDependencies": {
     "@vitejs/plugin-vue": "^5.2.1",
+    "electron": "^36.4.0",
+    "electron-builder": "^26.0.12",
     "typescript": "~5.7.2",
     "vite": "^6.2.0",
     "vue-tsc": "^2.2.4"
+  },
+  "main": "electron/main.cjs",
+  "build": {
+    "appId": "com.courttrace.desktop",
+    "productName": "COURTTRACE",
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "dist/**/*",
+      "electron/**/*",
+      "package.json"
+    ],
+    "extraResources": [
+      {
+        "from": "release/backend",
+        "to": "backend",
+        "filter": [
+          "**/*"
+        ]
+      },
+      {
+        "from": "models",
+        "to": "models",
+        "filter": [
+          "**/*"
+        ]
+      },
+      {
+        "from": "release/ffmpeg",
+        "to": "ffmpeg",
+        "filter": [
+          "**/*"
+        ]
+      }
+    ],
+    "win": {
+      "target": "nsis",
+      "signAndEditExecutable": false
+    },
+    "nsis": {
+      "oneClick": true,
+      "perMachine": false,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true
+    }
   }
 }

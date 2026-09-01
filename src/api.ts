@@ -1,7 +1,9 @@
 import type { Clip, ClipCollections, EventRecord, Health, Match, Run, TeamHighlightExport, TeamTrainingStatus, Workspace } from './types'
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
-  const response = await fetch(path, init)
+  const desktop = (window as Window & { courtTraceDesktop?: { apiBase?: string } }).courtTraceDesktop
+  const base = desktop?.apiBase || (window as Window & { __COURTTRACE_API__?: string }).__COURTTRACE_API__ || ''
+  const response = await fetch(`${base}${path}`, init)
   if (!response.ok) {
     let detail = `API ${response.status}`
     try { detail = (await response.json()).detail ?? detail } catch { /* non JSON error */ }

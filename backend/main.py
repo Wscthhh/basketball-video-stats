@@ -22,8 +22,8 @@ from pydantic import BaseModel, ConfigDict, Field
 from .analyzer import BasketballAnalyzer, classify_clip_team, resolve_command
 from .team_classifier import classify as classify_team
 
-ROOT = Path(__file__).resolve().parent.parent
-DATA_DIR = ROOT / "data"
+ROOT = Path(os.getenv("COURTTRACE_APP_ROOT", str(Path(__file__).resolve().parent.parent)))
+DATA_DIR = Path(os.getenv("COURTTRACE_DATA_DIR", str(ROOT / "data")))
 UPLOAD_DIR = DATA_DIR / "uploads"
 COVERS_DIR = DATA_DIR / "covers"
 CATEGORY_DATA_DIR = DATA_DIR / "training" / "review"
