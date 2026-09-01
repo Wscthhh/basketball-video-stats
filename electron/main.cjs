@@ -42,8 +42,15 @@ function startBackend() {
 async function createWindow() {
   startBackend()
   try { await waitForBackend(backendPort) } catch (error) { dialog.showErrorBox('COURTTRACE 启动失败', error.message); app.quit(); return }
-  const window = new BrowserWindow({ width: 1440, height: 920, minWidth: 1000, minHeight: 700, webPreferences: { preload: path.join(__dirname, 'preload.cjs'), contextIsolation: true, sandbox: true }, additionalArguments: [`--courttrace-api=http://127.0.0.1:${backendPort}`] })
-  await window.loadFile(path.join(app.isPackaged ? process.resourcesPath : path.join(__dirname, '..'), 'dist', 'index.html'))
+  const window = new BrowserWindow({ width: 1440, height: 920, minWidth: 1000, minHeight: 700, webPreferences: { preload: path.join(__dirname, 'preload.cjs'), contextIsolation: true, sandbox: true, additionalArguments: [`--courttrace-api=http://127.0.0.1:${backendPort}`] } })
+  const indexPath = app.isPackaged ? path.join(__dirname, '..', 'dist', 'index.html') : path.join(__dirname, '..', 'dist', 'index.html')
+  try {
+    await window.loadFile(indexPath)
+  } catch (error) {
+    dialog.showErrorBox('COURTTRACE 加载失败', error.message)
+    window.destroy()
+    app.quit()
+  }
 }
 
 app.whenReady().then(createWindow)
