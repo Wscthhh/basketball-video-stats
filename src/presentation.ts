@@ -21,6 +21,18 @@ export function clipSource(clip: Clip) {
   return '待判断'
 }
 
+export function clipTeamStatus(clip: Clip) {
+  if (clip.teamSource === 'manual' || clip.teamConfirmed === true) return '已确认'
+  if (clip.teamSource === 'ai') return 'AI 归属'
+  return '待确认'
+}
+
+export function clipTeamStatusClass(clip: Clip) {
+  if (clip.teamSource === 'manual' || clip.teamConfirmed === true) return 'confirmed'
+  if (clip.teamSource === 'ai') return 'ai'
+  return 'pending'
+}
+
 export function formatSeconds(value?: number | null) {
   if (value == null) return '--:--'
   const minutes = Math.floor(value / 60).toString().padStart(2, '0')
