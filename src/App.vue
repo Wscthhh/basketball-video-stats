@@ -253,11 +253,13 @@ function cancelReassign() {}
 async function deleteActiveClip() {
   const clip = activeClip.value
   if (!clip || busy.value || !window.confirm(`确定删除片段“${clip.name}”吗？此操作无法撤销。`)) return
+  const reviewIndex = unresolvedClips.value.findIndex((item) => item.id === clip.id)
   busy.value = true
   try {
     await api.deleteClip(clip.id)
-    activeClipId.value = ''
     await refresh()
+    if (reviewIndex >= 0) advanceReviewClip(clip.id, reviewIndex)
+    else closeClip()
   } catch (error) {
     fail(error)
   } finally {
