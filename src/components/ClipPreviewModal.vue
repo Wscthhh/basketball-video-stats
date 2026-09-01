@@ -1,11 +1,11 @@
 <script setup lang="ts">
-import { computed, onMounted, ref, watch } from 'vue'
-import { Trash2, X } from 'lucide-vue-next'
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { ChevronLeft, ChevronRight, Trash2, X } from 'lucide-vue-next'
 import { clipSource, statusLabel } from '../presentation'
 import type { Clip, Team } from '../types'
 import TeamColorSwatch from './TeamColorSwatch.vue'
 
-const props = defineProps<{ clip: Clip; homeTeam?: Team; awayTeam?: Team; busy: boolean }>()
+const props = defineProps<{ clip: Clip; homeTeam?: Team; awayTeam?: Team; busy: boolean; reviewClips?: Clip[] }>()
 const emit = defineEmits<{
   close: []
   confirmTeam: [teamId: string | null]
@@ -13,12 +13,17 @@ const emit = defineEmits<{
   startReassign: []
   cancelReassign: []
   deleteClip: []
+  navigate: [direction: -1 | 1]
 }>()
 
 const videoRef = ref<HTMLVideoElement | null>(null)
 const selectedTeamId = ref<string | null>(props.clip.teamId ?? null)
 const editingTeam = ref(!props.clip.teamId)
 const teamConfirmed = computed(() => props.clip.teamSource === 'manual')
+const reviewIndex = computed(() => (props.reviewClips ?? []).findIndex((clip) => clip.id === props.clip.id))
+const inReviewQueue = computed(() => reviewIndex.value >= 0)
+const canNavigatePrevious = computed(() => reviewIndex.value > 0)
+const canNavigateNext = computed(() => reviewIndex.value >= 0 && reviewIndex.value < (props.reviewClips?.length ?? 0) - 1)
 const assignedTeamName = computed(() => {
   const homeTeam = props.homeTeam
   const awayTeam = props.awayTeam
@@ -49,6 +54,14 @@ watch(() => props.clip.id, () => {
 })
 
 onMounted(() => void videoRef.value?.play().catch(() => undefined))
+
+function handleKeydown(event: KeyboardEvent) {
+  if (event.key === 'ArrowLeft' && canNavigatePrevious.value) emit('navigate', -1)
+  if (event.key === 'ArrowRight' && canNavigateNext.value) emit('navigate', 1)
+}
+
+onMounted(() => window.addEventListener('keydown', handleKeydown))
+onBeforeUnmount(() => window.removeEventListener('keydown', handleKeydown))
 </script>
 
 <template>
@@ -57,6 +70,11 @@ onMounted(() => void videoRef.value?.play().catch(() => undefined))
       <div class="modal-header">
         <div><span class="panel-kicker">CLIP PREVIEW</span><h2>{{ clip.name }}</h2><p>{{ statusLabel(clip.status) }} · {{ clipSource(clip) }}</p></div>
         <button class="icon-button dark" type="button" title="关闭" @click="$emit('close')"><X :size="18" /></button>
+      </div>
+      <div v-if="inReviewQueue" class="clip-review-navigation">
+        <button class="icon-button dark" type="button" title="上一个待确认片段" :disabled="busy || !canNavigatePrevious" @click="emit('navigate', -1)"><ChevronLeft :size="18" /></button>
+        <span>{{ reviewIndex + 1 }} / {{ reviewClips?.length }}</span>
+        <button class="icon-button dark" type="button" title="下一个待确认片段" :disabled="busy || !canNavigateNext" @click="emit('navigate', 1)"><ChevronRight :size="18" /></button>
       </div>
        <div class="highlight-player-video">
          <video v-if="clip.previewUrl" ref="videoRef" controls playsinline :src="clip.previewUrl"></video>
@@ -98,6 +116,6 @@ onMounted(() => void videoRef.value?.play().catch(() => undefined))
 </template>
 
 <style scoped>
-.clip-detail-actions{display:flex;align-items:flex-end;justify-content:space-between;gap:16px;padding-top:18px}.clip-detail-team-label{display:grid;gap:5px;margin-right:auto}.clip-detail-team-label strong{color:#dfe9df;font-size:12px}.team-assignment-editor{display:grid;justify-items:end;gap:10px}.team-assignment-actions{display:flex;gap:7px}.button-danger{color:#ffd7cf;background:#301815;border:1px solid #8d3f34}.button-danger:hover{color:#fff;background:#a33d30;border-color:#c95849}.team-choice button:disabled{cursor:not-allowed;opacity:.45}.team-choice button{display:inline-flex;align-items:center;gap:6px}
+.clip-review-navigation{display:flex;align-items:center;justify-content:center;gap:12px;margin:14px 0 2px;color:#a9b8aa;font-size:12px}.clip-review-navigation .icon-button:disabled{cursor:not-allowed;opacity:.35}.clip-detail-actions{display:flex;align-items:flex-end;justify-content:space-between;gap:16px;padding-top:18px}.clip-detail-team-label{display:grid;gap:5px;margin-right:auto}.clip-detail-team-label strong{color:#dfe9df;font-size:12px}.team-assignment-editor{display:grid;justify-items:end;gap:10px}.team-assignment-actions{display:flex;gap:7px}.button-danger{color:#ffd7cf;background:#301815;border:1px solid #8d3f34}.button-danger:hover{color:#fff;background:#a33d30;border-color:#c95849}.team-choice button:disabled{cursor:not-allowed;opacity:.45}.team-choice button{display:inline-flex;align-items:center;gap:6px}
 @media(max-width:760px){.clip-detail-actions{align-items:stretch;flex-direction:column}.button-danger{width:100%}}
 </style>

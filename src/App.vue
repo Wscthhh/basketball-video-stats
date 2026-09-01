@@ -198,6 +198,22 @@ function openClip(clip: Clip) {
   activeClipId.value = clip.id
 }
 
+function navigateReviewClip(direction: -1 | 1) {
+  const index = unresolvedClips.value.findIndex((clip) => clip.id === activeClipId.value)
+  const target = unresolvedClips.value[index + direction]
+  if (target) activeClipId.value = target.id
+}
+
+function advanceReviewClip(previousId: string, previousIndex: number) {
+  if (!unresolvedClips.value.length) {
+    closeClip()
+    return
+  }
+  const next = unresolvedClips.value[previousIndex] ?? unresolvedClips.value[previousIndex - 1]
+  if (next && next.id !== previousId) activeClipId.value = next.id
+  else closeClip()
+}
+
 function closeClip() {
   activeClipId.value = ''
 }
@@ -218,7 +234,12 @@ async function setClipTeam(teamId: string | null): Promise<boolean> {
 }
 
 async function confirmClipTeam(teamId: string | null) {
-  if (await setClipTeam(teamId)) closeClip()
+  const previousId = activeClipId.value
+  const previousIndex = unresolvedClips.value.findIndex((clip) => clip.id === previousId)
+  if (await setClipTeam(teamId)) {
+    if (teamId && previousIndex >= 0) advanceReviewClip(previousId, previousIndex)
+    else closeClip()
+  }
 }
 
 async function reassignClipTeam(teamId: string | null) {
@@ -268,6 +289,6 @@ onBeforeUnmount(stopPolling)
 
     <CreateMatchModal v-if="showCreate" v-model:draft="createDraft" :busy="busy" @close="showCreate = false" @submit="createMatch" />
     <ImportClipsModal v-if="showImport" :files="pendingFiles" :busy="busy" @close="showImport = false" @select-files="pendingFiles = $event" @upload="upload" />
-    <ClipPreviewModal v-if="activeClip" :clip="activeClip" :home-team="homeTeam" :away-team="awayTeam" :busy="busy" @close="closeClip" @confirm-team="confirmClipTeam" @save-team="reassignClipTeam" @start-reassign="startReassign" @cancel-reassign="cancelReassign" @delete-clip="deleteActiveClip" />
+    <ClipPreviewModal v-if="activeClip" :clip="activeClip" :home-team="homeTeam" :away-team="awayTeam" :busy="busy" :review-clips="unresolvedClips" @close="closeClip" @confirm-team="confirmClipTeam" @save-team="reassignClipTeam" @start-reassign="startReassign" @cancel-reassign="cancelReassign" @delete-clip="deleteActiveClip" @navigate="navigateReviewClip" />
   </div>
 </template>
