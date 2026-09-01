@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { ChevronLeft, ChevronRight, Trash2, X } from 'lucide-vue-next'
 import { clipSource, statusLabel } from '../presentation'
 import type { Clip, Team } from '../types'
@@ -51,9 +51,18 @@ function cancelReassign() {
 watch(() => props.clip.id, () => {
   selectedTeamId.value = props.clip.teamId ?? null
   editingTeam.value = !props.clip.teamId
+  void playClip()
 })
 
-onMounted(() => void videoRef.value?.play().catch(() => undefined))
+async function playClip() {
+  await nextTick()
+  const video = videoRef.value
+  if (!video) return
+  video.load()
+  await video.play().catch(() => undefined)
+}
+
+onMounted(() => void playClip())
 
 function handleKeydown(event: KeyboardEvent) {
   if (event.key === 'ArrowLeft' && canNavigatePrevious.value) emit('navigate', -1)
