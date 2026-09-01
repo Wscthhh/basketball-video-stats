@@ -280,7 +280,7 @@ class InputModel(BaseModel):
 
 
 class MatchInput(InputModel):
-    name: str = Field(min_length=1, max_length=120)
+    name: str | None = Field(default=None, max_length=120)
     played_at: str | None = None
     venue: str | None = None
     status: str = "draft"
@@ -465,9 +465,10 @@ async def create_match(data: MatchInput) -> dict[str, Any]:
     for team in (data.home_team, data.away_team):
         if not str(team.get("name", "")).strip():
             raise HTTPException(422, "both team names are required")
+    match_name = f"{str(data.home_team.get('name', '')).strip()} VS {str(data.away_team.get('name', '')).strip()}"
     match_id = uuid.uuid4().hex
     with db() as c:
-        c.execute("INSERT INTO matches VALUES(?,?,?,?,?,?,?)", (match_id, data.name, data.played_at, data.venue, data.status, int(data.is_test), now()))
+        c.execute("INSERT INTO matches VALUES(?,?,?,?,?,?,?)", (match_id, match_name, data.played_at, data.venue, data.status, int(data.is_test), now()))
         for side, team in (("home", data.home_team), ("away", data.away_team)):
             c.execute("INSERT INTO teams(id,match_id,side,name,color) VALUES(?,?,?,?,?)", (f"{match_id}-{side}", match_id, side, team.get("name", ""), team.get("color")))
         return match_payload(c, c.execute("SELECT * FROM matches WHERE id=?", (match_id,)).fetchone())

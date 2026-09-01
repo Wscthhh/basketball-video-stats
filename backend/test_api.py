@@ -64,6 +64,11 @@ class ApiTest(unittest.TestCase):
         self.assertEqual(workspace["match"]["homeTeam"]["name"], "Red")
         self.assertIsInstance(workspace["stats"], list)
 
+    def test_match_name_is_generated_from_team_names(self) -> None:
+        response = self.client.post("/api/matches", json={"name": "旧标题", "homeTeam": {"name": "Home"}, "awayTeam": {"name": "Away"}})
+        self.assertEqual(response.status_code, 201)
+        self.assertEqual(response.json()["name"], "Home VS Away")
+
     def test_matches_are_ordered_by_creation_time(self) -> None:
         older = self.client.post("/api/matches", json={"name": "Older", "homeTeam": {"name": "Home"}, "awayTeam": {"name": "Away"}}).json()["id"]
         newer = self.client.post("/api/matches", json={"name": "Newer", "playedAt": "2020-01-01", "homeTeam": {"name": "Home"}, "awayTeam": {"name": "Away"}}).json()["id"]
