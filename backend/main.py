@@ -1166,8 +1166,6 @@ async def run_analysis(run_id: str, match_id: str, clip_ids: list[str], device: 
         with db() as c:
             c.execute("UPDATE analysis_runs SET status=?,progress=100,error=?,details_json=?,finished_at=? WHERE id=?", ("failed" if errors else "completed", "; ".join(errors.values()), json.dumps({"errors": errors}), now(), run_id))
     except Exception as error:
-        print(f"analysis failed: {error}")
-        print(f"analysis failed: {error}")
         with db() as c:
             marks = ",".join("?" for _ in clip_ids)
             if marks:
