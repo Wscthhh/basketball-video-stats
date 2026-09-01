@@ -10,11 +10,14 @@
     "build": "vue-tsc -b && vite build",
     "preview": "vite preview",
     "desktop:prepare": "powershell -ExecutionPolicy Bypass -File scripts/build-desktop.ps1",
-    "desktop:build": "npm run desktop:prepare && npm run build",
+    "desktop:build": "npm run build",
+    "desktop:prepare-runtime": "powershell -ExecutionPolicy Bypass -File scripts/build-desktop.ps1",
+    "desktop:runtime": "npm run desktop:prepare-runtime && powershell -ExecutionPolicy Bypass -File scripts/build-runtime.ps1",
     "desktop:package": "npm run desktop:build && electron-builder --win nsis",
     "desktop:inno": "npm run build && powershell -ExecutionPolicy Bypass -File scripts/build-inno.ps1"
   },
   "dependencies": {
+    "electron-updater": "^6.6.2",
     "lucide-vue-next": "^0.468.0",
     "vue": "^3.5.13"
   },
@@ -39,29 +42,6 @@
       "electron/**/*",
       "package.json"
     ],
-    "extraResources": [
-      {
-        "from": "release/backend",
-        "to": "backend",
-        "filter": [
-          "**/*"
-        ]
-      },
-      {
-        "from": "models",
-        "to": "models",
-        "filter": [
-          "**/*"
-        ]
-      },
-      {
-        "from": "release/ffmpeg",
-        "to": "ffmpeg",
-        "filter": [
-          "**/*"
-        ]
-      }
-    ],
     "win": {
       "target": "nsis",
       "signAndEditExecutable": false
@@ -72,6 +52,7 @@
       "createDesktopShortcut": true,
       "createStartMenuShortcut": true,
       "useZip": true
-    }
+    },
+    "publish": [{ "provider": "github", "owner": "Wscthhh", "repo": "basketball-video-stats" }]
   }
 }
