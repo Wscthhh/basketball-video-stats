@@ -20,6 +20,7 @@ class ApiTest(unittest.TestCase):
         self.old_covers_dir = main.COVERS_DIR
         self.old_category_data_dir = main.CATEGORY_DATA_DIR
         self.old_clip_team_data_dir = main.CLIP_TEAM_DATA_DIR
+        self.old_training_archive_dir = main.TRAINING_ARCHIVE_DIR
         main.DB_PATH = Path(self.temp.name) / "test.sqlite3"
         main.DATA_DIR = Path(self.temp.name) / "data"
         main.UPLOAD_DIR = main.DATA_DIR / "uploads"
@@ -27,11 +28,13 @@ class ApiTest(unittest.TestCase):
         main.CATEGORY_DATA_DIR = main.DATA_DIR / "training" / "review"
         main.CLIP_TEAM_DATA_DIR = main.DATA_DIR / "training" / "clip-team"
         main.EXPORT_DIR = main.DATA_DIR / "exports"
+        main.TRAINING_ARCHIVE_DIR = main.DATA_DIR / "training" / "archive"
         main.UPLOAD_DIR.mkdir(parents=True)
         main.COVERS_DIR.mkdir(parents=True)
         main.CATEGORY_DATA_DIR.mkdir(parents=True)
         main.CLIP_TEAM_DATA_DIR.mkdir(parents=True)
         main.EXPORT_DIR.mkdir(parents=True)
+        main.TRAINING_ARCHIVE_DIR.mkdir(parents=True)
         main.init_db()
         with main.db() as connection:
             connection.execute("INSERT INTO matches VALUES(?,?,?,?,?,?,?)", ("integration-test", "integration-test", None, None, "active", 1, main.now()))
@@ -46,6 +49,7 @@ class ApiTest(unittest.TestCase):
         main.COVERS_DIR = self.old_covers_dir
         main.CATEGORY_DATA_DIR = self.old_category_data_dir
         main.CLIP_TEAM_DATA_DIR = self.old_clip_team_data_dir
+        main.TRAINING_ARCHIVE_DIR = self.old_training_archive_dir
         self.temp.cleanup()
 
     def test_match_teams_workspace_and_test_filter(self) -> None:
@@ -81,6 +85,21 @@ class ApiTest(unittest.TestCase):
         main.init_db()
         with main.db() as c:
             self.assertEqual(c.execute("SELECT status FROM clips WHERE id='stale-clip'").fetchone()["status"], "queued")
+
+    def test_delete_match_preserves_training_archives(self) -> None:
+        match_id = self.client.post("/api/matches", json={"name": "Delete me", "homeTeam": {"name": "Home"}, "awayTeam": {"name": "Away"}}).json()["id"]
+        frame = main.CLIP_TEAM_DATA_DIR / match_id / "clip" / "frame-00.jpg"
+        frame.parent.mkdir(parents=True)
+        frame.write_bytes(b"training")
+        with main.db() as c:
+            c.execute("INSERT INTO clips(id,match_id,filename,stored_path,sha256,size_bytes,created_at) VALUES(?,?,?,?,?,?,?)", ("clip", match_id, "x.mp4", "x.mp4", "delete-match-hash", 1, main.now()))
+            c.execute("INSERT INTO clip_review_samples(id,match_id,clip_id,team_id,label,frames_json,metadata_json,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?)", ("sample", match_id, "clip", f"{match_id}-home", "team_home", json.dumps([str(frame.relative_to(main.DATA_DIR))]), "{}", main.now(), main.now()))
+        response = self.client.delete(f"/api/matches/{match_id}")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["trainingSamplesPreserved"], 1)
+        self.assertTrue(list((main.TRAINING_ARCHIVE_DIR / "team" / match_id).rglob("*.jpg")))
+        with main.db() as c:
+            self.assertIsNotNone(c.execute("SELECT id FROM archived_team_training_samples WHERE source_match_id=?", (match_id,)).fetchone())
 
     def test_stats_merge_and_explicit_clear(self) -> None:
         match_id = self.client.post("/api/matches", json={"name": "Stats", "homeTeam": {"name": "A"}, "awayTeam": {"name": "B"}}).json()["id"]

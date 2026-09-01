@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { ref } from 'vue'
-import { Activity, CheckCheck, ChevronDown, Cpu, Film, Plus, ScanLine } from 'lucide-vue-next'
+import { Activity, CheckCheck, ChevronDown, Cpu, Film, FolderOpen, Plus, ScanLine, Trash2 } from 'lucide-vue-next'
 import type { Health, Match, TabKey } from '../types'
 
 defineProps<{
@@ -17,6 +17,8 @@ const emit = defineEmits<{
   selectTab: [tab: TabKey]
   selectMatch: [id: string]
   createMatch: []
+  openFolder: []
+  deleteMatch: []
 }>()
 
 const showMatchMenu = ref(false)
@@ -46,6 +48,8 @@ function selectMatch(id: string) {
       <button v-for="item in matches" :key="item.id" type="button" :class="{ active: item.id === match?.id }" @click="selectMatch(item.id)">
         {{ item.name }}
       </button>
+      <button type="button" @click="emit('openFolder')"><FolderOpen :size="14" /> 打开存储文件夹</button>
+      <button class="match-danger" type="button" @click="emit('deleteMatch')"><Trash2 :size="14" /> 删除本场比赛</button>
     </div>
     <button class="sidebar-create-button" type="button" @click="emit('createMatch')">
       <Plus :size="15" /> 创建比赛
@@ -69,3 +73,7 @@ function selectMatch(id: string) {
     </div>
   </aside>
 </template>
+
+<style scoped>
+.match-menu button{display:flex;align-items:center;gap:7px}.match-menu .match-danger{color:#ff9f91}.match-menu .match-danger:hover{color:#ffd1c9;background:#321b18}
+</style>

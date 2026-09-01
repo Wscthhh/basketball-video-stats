@@ -28,12 +28,14 @@ UPLOAD_DIR = DATA_DIR / "uploads"
 COVERS_DIR = DATA_DIR / "covers"
 CATEGORY_DATA_DIR = DATA_DIR / "training" / "review"
 CLIP_TEAM_DATA_DIR = DATA_DIR / "training" / "clip-team"
+TRAINING_ARCHIVE_DIR = DATA_DIR / "training" / "archive"
 EXPORT_DIR = DATA_DIR / "exports"
 DB_PATH = DATA_DIR / "courttrace.sqlite3"
 UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 COVERS_DIR.mkdir(parents=True, exist_ok=True)
 CATEGORY_DATA_DIR.mkdir(parents=True, exist_ok=True)
 CLIP_TEAM_DATA_DIR.mkdir(parents=True, exist_ok=True)
+TRAINING_ARCHIVE_DIR.mkdir(parents=True, exist_ok=True)
 EXPORT_DIR.mkdir(parents=True, exist_ok=True)
 app = FastAPI(title="COURTTRACE Local Analysis API", version="0.2.0")
 app.add_middleware(CORSMiddleware, allow_origins=["http://127.0.0.1:5173", "http://localhost:5173"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
@@ -69,6 +71,9 @@ def init_db() -> None:
          CREATE TABLE IF NOT EXISTS clip_review_samples (id TEXT PRIMARY KEY, match_id TEXT NOT NULL, clip_id TEXT NOT NULL UNIQUE, team_id TEXT NOT NULL, label TEXT NOT NULL, frames_json TEXT NOT NULL DEFAULT '[]', metadata_json TEXT NOT NULL DEFAULT '{}', created_at TEXT NOT NULL, updated_at TEXT NOT NULL, FOREIGN KEY(match_id) REFERENCES matches(id), FOREIGN KEY(clip_id) REFERENCES clips(id), FOREIGN KEY(team_id) REFERENCES teams(id));
          CREATE TABLE IF NOT EXISTS team_highlight_exports (id TEXT PRIMARY KEY, match_id TEXT NOT NULL, team_id TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'queued', progress REAL NOT NULL DEFAULT 0, clip_ids_json TEXT NOT NULL DEFAULT '[]', output_path TEXT, error TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL, updated_at TEXT NOT NULL, FOREIGN KEY(match_id) REFERENCES matches(id), FOREIGN KEY(team_id) REFERENCES teams(id));
          CREATE TABLE IF NOT EXISTS team_classifier_profiles (team_id TEXT PRIMARY KEY, match_id TEXT NOT NULL, sample_count INTEGER NOT NULL DEFAULT 0, rgb_json TEXT NOT NULL, trained_at TEXT NOT NULL, FOREIGN KEY(team_id) REFERENCES teams(id));
+         CREATE TABLE IF NOT EXISTS archived_team_training_samples (id TEXT PRIMARY KEY, source_match_id TEXT NOT NULL, source_team_id TEXT NOT NULL, label TEXT NOT NULL, frames_json TEXT NOT NULL DEFAULT '[]', metadata_json TEXT NOT NULL DEFAULT '{}', created_at TEXT NOT NULL, archived_at TEXT NOT NULL);
+         CREATE TABLE IF NOT EXISTS archived_team_classifier_profiles (id TEXT PRIMARY KEY, source_match_id TEXT NOT NULL, source_team_id TEXT NOT NULL, side TEXT, sample_count INTEGER NOT NULL, rgb_json TEXT NOT NULL, trained_at TEXT NOT NULL, archived_at TEXT NOT NULL);
+         CREATE TABLE IF NOT EXISTS archived_scoring_training_samples (id TEXT PRIMARY KEY, source_match_id TEXT NOT NULL, source_clip_id TEXT NOT NULL, source_event_id TEXT NOT NULL, label TEXT NOT NULL, team_id TEXT, shot_type TEXT, seconds REAL NOT NULL, metadata_json TEXT NOT NULL DEFAULT '{}', archived_at TEXT NOT NULL);
           """)
         run_columns = {r["name"] for r in c.execute("PRAGMA table_info(analysis_runs)")}
         clip_columns = {r["name"] for r in c.execute("PRAGMA table_info(clips)")}
@@ -339,6 +344,95 @@ async def startup() -> None:
 async def health() -> dict[str, Any]:
     has_cuda = cuda_available()
     return {"ok": True, "device": "cuda" if has_cuda else "cpu", "cuda": has_cuda, "torchInstalled": torch_installed(), "ffmpeg": command_available("ffmpeg"), "ffprobe": command_available("ffprobe"), "mode": "GPU 加速" if has_cuda else "CPU fallback", "analyzer": ANALYZER.status()}
+
+
+def match_storage_path(match_id: str) -> Path:
+    return UPLOAD_DIR / match_id
+
+
+@app.get("/api/matches/{match_id}/storage")
+async def match_storage(match_id: str) -> dict[str, Any]:
+    with db() as c:
+        require_match(match_id, c)
+        clip_count = c.execute("SELECT COUNT(*) FROM clips WHERE match_id=?", (match_id,)).fetchone()[0]
+    root = match_storage_path(match_id)
+    files = [path for path in root.rglob("*") if path.is_file()] if root.is_dir() else []
+    return {"matchId": match_id, "path": str(root.resolve()), "exists": root.is_dir(), "fileCount": len(files), "sizeBytes": sum(path.stat().st_size for path in files), "clipCount": clip_count}
+
+
+@app.post("/api/matches/{match_id}/open-folder")
+async def open_match_folder(match_id: str) -> dict[str, Any]:
+    with db() as c:
+        require_match(match_id, c)
+    root = match_storage_path(match_id)
+    root.mkdir(parents=True, exist_ok=True)
+    if os.name == "nt":
+        subprocess.Popen(["explorer.exe", str(root.resolve())])
+    else:
+        raise HTTPException(501, "当前系统不支持打开文件夹")
+    return {"opened": True, "path": str(root.resolve())}
+
+
+def archive_training_for_match(c: sqlite3.Connection, match_id: str) -> tuple[int, int]:
+    archived_at = now()
+    samples = c.execute("SELECT * FROM clip_review_samples WHERE match_id=?", (match_id,)).fetchall()
+    for sample in samples:
+        archived_frames = []
+        for frame in json.loads(sample["frames_json"] or "[]"):
+            source = DATA_DIR / frame
+            target = TRAINING_ARCHIVE_DIR / "team" / match_id / sample["clip_id"] / Path(frame).name
+            if source.is_file():
+                target.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(source, target)
+                archived_frames.append(str(target.relative_to(DATA_DIR)))
+        c.execute("INSERT INTO archived_team_training_samples(id,source_match_id,source_team_id,label,frames_json,metadata_json,created_at,archived_at) VALUES(?,?,?,?,?,?,?,?)", (uuid.uuid4().hex, match_id, sample["team_id"], sample["label"], json.dumps(archived_frames), sample["metadata_json"], sample["created_at"], archived_at))
+    scoring_samples = c.execute("SELECT * FROM review_samples WHERE match_id=?", (match_id,)).fetchall()
+    for sample in scoring_samples:
+        metadata = json.loads(sample["metadata_json"] or "{}")
+        frames = metadata.get("frames", [])
+        archived_frames = []
+        for frame in frames:
+            source = DATA_DIR / frame
+            target = TRAINING_ARCHIVE_DIR / "scoring" / match_id / sample["id"] / Path(frame).name
+            if source.is_file():
+                target.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(source, target)
+                archived_frames.append(str(target.relative_to(DATA_DIR)))
+        metadata["frames"] = archived_frames
+        c.execute("INSERT INTO archived_scoring_training_samples(id,source_match_id,source_clip_id,source_event_id,label,team_id,shot_type,seconds,metadata_json,archived_at) VALUES(?,?,?,?,?,?,?,?,?,?)", (uuid.uuid4().hex, match_id, sample["clip_id"], sample["event_id"], sample["label"], sample["team_id"], sample["shot_type"], sample["seconds"], json.dumps(metadata), archived_at))
+    profiles = c.execute("SELECT p.*,t.side FROM team_classifier_profiles p LEFT JOIN teams t ON t.id=p.team_id WHERE p.match_id=?", (match_id,)).fetchall()
+    for profile in profiles:
+        c.execute("INSERT INTO archived_team_classifier_profiles(id,source_match_id,source_team_id,side,sample_count,rgb_json,trained_at,archived_at) VALUES(?,?,?,?,?,?,?,?)", (uuid.uuid4().hex, match_id, profile["team_id"], profile["side"], profile["sample_count"], profile["rgb_json"], profile["trained_at"], archived_at))
+    return len(samples), len(profiles)
+
+
+@app.delete("/api/matches/{match_id}")
+async def delete_match(match_id: str) -> dict[str, Any]:
+    paths = {UPLOAD_DIR / match_id, COVERS_DIR / match_id, CATEGORY_DATA_DIR / match_id, CLIP_TEAM_DATA_DIR / match_id, EXPORT_DIR / match_id}
+    with db() as c:
+        require_match(match_id, c)
+        sample_count, profile_count = archive_training_for_match(c, match_id)
+        run_ids = [row["id"] for row in c.execute("SELECT id FROM analysis_runs WHERE match_id=?", (match_id,)).fetchall()]
+        paths.update(DATA_DIR / "analysis" / run_id for run_id in run_ids)
+        clip_ids = [row["id"] for row in c.execute("SELECT id FROM clips WHERE match_id=?", (match_id,)).fetchall()]
+        if clip_ids:
+            marks = ",".join("?" for _ in clip_ids)
+            c.execute(f"DELETE FROM event_revisions WHERE event_id IN (SELECT id FROM analysis_events WHERE clip_id IN ({marks}))", clip_ids)
+            c.execute(f"DELETE FROM analysis_events WHERE clip_id IN ({marks})", clip_ids)
+            c.execute(f"DELETE FROM player_tracks WHERE clip_id IN ({marks})", clip_ids)
+        c.execute("DELETE FROM review_samples WHERE match_id=?", (match_id,))
+        c.execute("DELETE FROM clip_review_samples WHERE match_id=?", (match_id,))
+        c.execute("DELETE FROM team_highlight_exports WHERE match_id=?", (match_id,))
+        c.execute("DELETE FROM team_classifier_profiles WHERE match_id=?", (match_id,))
+        c.execute("DELETE FROM analysis_runs WHERE match_id=?", (match_id,))
+        c.execute("DELETE FROM players WHERE match_id=?", (match_id,))
+        c.execute("DELETE FROM clips WHERE match_id=?", (match_id,))
+        c.execute("DELETE FROM teams WHERE match_id=?", (match_id,))
+        c.execute("DELETE FROM matches WHERE id=?", (match_id,))
+    for path in paths:
+        if path.exists():
+            shutil.rmtree(path, ignore_errors=True)
+    return {"id": match_id, "deleted": True, "trainingSamplesPreserved": sample_count, "modelProfilesPreserved": profile_count}
 
 
 @app.get("/api/matches/{match_id}/team-classifier/training-status")

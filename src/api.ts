@@ -27,4 +27,6 @@ export const api = {
   generateTeamHighlight: (matchId: string, teamId: string) => request<TeamHighlightExport>(`/api/matches/${encodeURIComponent(matchId)}/team-highlights/${encodeURIComponent(teamId)}/generate`, { method: 'POST' }),
   teamTrainingStatus: (id: string) => request<TeamTrainingStatus>(`/api/matches/${encodeURIComponent(id)}/team-classifier/training-status`),
   trainTeamClassifier: (id: string) => request<TeamTrainingStatus>(`/api/matches/${encodeURIComponent(id)}/team-classifier/train`, { method: 'POST' }),
+  openMatchFolder: (id: string) => request<{ opened: boolean; path: string }>(`/api/matches/${encodeURIComponent(id)}/open-folder`, { method: 'POST' }),
+  deleteMatch: (id: string) => request<{ id: string; deleted: boolean; trainingSamplesPreserved: number; modelProfilesPreserved: number }>(`/api/matches/${encodeURIComponent(id)}`, { method: 'DELETE' }),
 }

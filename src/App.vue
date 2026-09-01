@@ -167,6 +167,25 @@ async function switchMatch(id: string) {
   }
 }
 
+async function openMatchFolder() {
+  if (!match.value) return
+  try { await api.openMatchFolder(match.value.id) } catch (error) { fail(error) }
+}
+
+async function deleteMatch() {
+  const current = match.value
+  if (!current || busy.value || !window.confirm(`确定删除比赛“${current.name}”吗？视频、分析结果和合集将被删除，但训练样本和模型结果会保留。`)) return
+  busy.value = true
+  try {
+    await api.deleteMatch(current.id)
+    const remaining = matches.value.filter((item) => item.id !== current.id)
+    matches.value = remaining
+    activeClipId.value = ''
+    if (remaining.length) await loadWorkspace((remaining.find((item) => !item.isTest) ?? remaining[0]).id)
+    else { match.value = null; workspace.value = null; collections.value = null; teamHighlights.value = [] }
+  } catch (error) { fail(error) } finally { busy.value = false }
+}
+
 async function refresh() {
   if (match.value) await loadWorkspace(match.value.id)
 }
@@ -333,7 +352,7 @@ onBeforeUnmount(() => { stopPolling(); stopExportPolling() })
 
 <template>
   <div class="app-shell">
-    <AppSidebar :tab="tab" :matches="matches" :match="match" :health="health" :ready-models="readyModels" :pending-count="unresolvedClips.length" :clip-count="clips.length" @select-tab="tab = $event" @select-match="switchMatch" @create-match="showCreate = true" />
+    <AppSidebar :tab="tab" :matches="matches" :match="match" :health="health" :ready-models="readyModels" :pending-count="unresolvedClips.length" :clip-count="clips.length" @select-tab="tab = $event" @select-match="switchMatch" @create-match="showCreate = true" @open-folder="openMatchFolder" @delete-match="deleteMatch" />
     <main class="main-shell">
       <header class="topbar"><div class="breadcrumb">比赛工作台 <ChevronRight :size="14" /><strong>{{ tab === 'overview' ? '总览' : tab === 'review' ? '复核' : '片段' }}</strong></div><div class="connection-state"><span :class="{ offline: !health }"></span>{{ health ? 'LOCAL ONLINE' : 'LOCAL OFFLINE' }}</div></header>
       <div class="page-content">
