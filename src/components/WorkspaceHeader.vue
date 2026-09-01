@@ -11,6 +11,7 @@ defineProps<{
   unresolvedCount: number
   busy: boolean
   polling: boolean
+  analysisRun?: { progress?: number; completed?: number; total?: number; status?: string; error?: string }
 }>()
 
 defineEmits<{ reanalyze: []; importClips: [] }>()
@@ -30,6 +31,11 @@ defineEmits<{ reanalyze: []; importClips: [] }>()
       <button class="button button-acid" type="button" @click="$emit('importClips')"><CloudUpload :size="17" /> 导入片段</button>
     </div>
   </section>
+  <section v-if="polling && analysisRun" class="analysis-progress" aria-live="polite">
+    <div class="analysis-progress-heading"><strong>正在分析片段</strong><span>{{ analysisRun.completed || 0 }} / {{ analysisRun.total || 0 }} 个片段 · {{ Math.round(analysisRun.progress || 0) }}%</span></div>
+    <div class="analysis-progress-track"><span :style="{ width: `${Math.max(0, Math.min(100, analysisRun.progress || 0))}%` }"></span></div>
+  </section>
+  <section v-else-if="analysisRun?.status === 'failed'" class="analysis-progress analysis-progress-error" role="alert"><strong>分析失败</strong><span>{{ analysisRun.error || '请检查片段后重试。' }}</span></section>
   <section class="metric-strip">
     <div class="metric-cell metric-primary"><div class="metric-label">全部片段</div><div class="metric-value">{{ clipCount }}</div><div class="metric-subline">当前比赛导入素材</div></div>
     <div class="metric-cell"><div class="metric-label">主队片段</div><div class="metric-value">{{ homeClipCount }}</div><div class="metric-subline">按球队归属</div></div>
@@ -41,4 +47,6 @@ defineEmits<{ reanalyze: []; importClips: [] }>()
 <style scoped>
 .team-heading{display:inline-flex;align-items:center;gap:9px}
 .team-heading :deep(.team-color-swatch){vertical-align:middle}
+.analysis-progress{display:grid;gap:9px;margin-top:18px;padding:14px 16px;background:#111a16;border:1px solid #304137;border-radius:5px;color:#aab8ac;font-size:11px}.analysis-progress-heading{display:flex;align-items:center;justify-content:space-between;gap:12px}.analysis-progress-heading strong{color:#e0ebe0}.analysis-progress-track{height:5px;overflow:hidden;background:#26342c;border-radius:999px}.analysis-progress-track span{display:block;height:100%;background:var(--acid);border-radius:inherit;transition:width .3s ease}.analysis-progress-error{display:flex;align-items:center;gap:10px;color:#ffd0c8;border-color:#773d35}.analysis-progress-error strong{color:#ff9e8f}
+@media(max-width:760px){.analysis-progress-heading{align-items:flex-start;flex-direction:column;gap:5px}}
 </style>
