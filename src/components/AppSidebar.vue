@@ -17,8 +17,8 @@ const emit = defineEmits<{
   selectTab: [tab: TabKey]
   selectMatch: [id: string]
   createMatch: []
-  openFolder: []
-  deleteMatch: []
+  openFolder: [id: string]
+  deleteMatch: [id: string]
 }>()
 
 const showMatchMenu = ref(false)
@@ -45,11 +45,11 @@ function selectMatch(id: string) {
       <ChevronDown :size="16" />
     </button>
     <div v-if="showMatchMenu" class="match-menu">
-      <button v-for="item in matches" :key="item.id" type="button" :class="{ active: item.id === match?.id }" @click="selectMatch(item.id)">
-        {{ item.name }}
-      </button>
-      <button type="button" @click="emit('openFolder')"><FolderOpen :size="14" /> 打开存储文件夹</button>
-      <button class="match-danger" type="button" @click="emit('deleteMatch')"><Trash2 :size="14" /> 删除本场比赛</button>
+      <div v-for="item in matches" :key="item.id" class="match-menu-row">
+        <button type="button" :class="{ active: item.id === match?.id }" @click="selectMatch(item.id)">{{ item.name }}</button>
+        <button class="match-action-button" type="button" title="打开比赛存储文件夹" :aria-label="`打开${item.name}存储文件夹`" @click="emit('openFolder', item.id)"><FolderOpen :size="14" /></button>
+        <button class="match-action-button match-delete-button" type="button" title="删除本场比赛" :aria-label="`删除${item.name}`" @click="emit('deleteMatch', item.id)"><Trash2 :size="14" /></button>
+      </div>
     </div>
     <button class="sidebar-create-button" type="button" @click="emit('createMatch')">
       <Plus :size="15" /> 创建比赛
@@ -75,5 +75,5 @@ function selectMatch(id: string) {
 </template>
 
 <style scoped>
-.match-menu button{display:flex;align-items:center;gap:7px}.match-menu .match-danger{color:#ff9f91}.match-menu .match-danger:hover{color:#ffd1c9;background:#321b18}
+.match-menu-row{display:grid;grid-template-columns:minmax(0,1fr) 30px 30px;gap:4px;align-items:center}.match-menu-row>button:first-child{min-width:0;overflow:hidden;text-align:left;text-overflow:ellipsis;white-space:nowrap}.match-action-button{display:grid;width:30px;height:30px;padding:0;place-items:center;color:#8f9e94;background:#18221e;border:1px solid var(--line);border-radius:4px}.match-action-button:hover{color:var(--acid);border-color:var(--acid)}.match-delete-button:hover{color:#ff9f91;border-color:#87473e;background:#321b18}
 </style>

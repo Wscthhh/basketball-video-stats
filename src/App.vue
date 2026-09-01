@@ -167,22 +167,24 @@ async function switchMatch(id: string) {
   }
 }
 
-async function openMatchFolder() {
-  if (!match.value) return
-  try { await api.openMatchFolder(match.value.id) } catch (error) { fail(error) }
+async function openMatchFolder(matchId: string) {
+  try { await api.openMatchFolder(matchId) } catch (error) { fail(error) }
 }
 
-async function deleteMatch() {
-  const current = match.value
+async function deleteMatch(matchId: string) {
+  const current = matches.value.find((item) => item.id === matchId)
   if (!current || busy.value || !window.confirm(`确定删除比赛“${current.name}”吗？视频、分析结果和合集将被删除，但训练样本和模型结果会保留。`)) return
+  const deletingCurrent = current.id === match.value?.id
   busy.value = true
   try {
     await api.deleteMatch(current.id)
     const remaining = matches.value.filter((item) => item.id !== current.id)
     matches.value = remaining
-    activeClipId.value = ''
-    if (remaining.length) await loadWorkspace((remaining.find((item) => !item.isTest) ?? remaining[0]).id)
-    else { match.value = null; workspace.value = null; collections.value = null; teamHighlights.value = [] }
+    if (current.id === match.value?.id) {
+      activeClipId.value = ''
+    if (remaining.length && deletingCurrent) await loadWorkspace((remaining.find((item) => !item.isTest) ?? remaining[0]).id)
+      else { match.value = null; workspace.value = null; collections.value = null; teamHighlights.value = [] }
+    }
   } catch (error) { fail(error) } finally { busy.value = false }
 }
 
