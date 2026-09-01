@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
-import { ChevronLeft, ChevronRight, Trash2, X } from 'lucide-vue-next'
+import { ChevronLeft, ChevronRight, Download, Trash2, X } from 'lucide-vue-next'
 import { clipSource, statusLabel } from '../presentation'
 import type { Clip, Team } from '../types'
 import TeamColorSwatch from './TeamColorSwatch.vue'
@@ -13,6 +13,7 @@ const emit = defineEmits<{
   startReassign: []
   cancelReassign: []
   deleteClip: []
+  exportClip: [clip: Clip]
   navigate: [direction: -1 | 1]
 }>()
 
@@ -118,13 +119,13 @@ onBeforeUnmount(() => window.removeEventListener('keydown', handleKeydown))
              </div>
            </div>
          </template>
-         <button class="button button-danger" type="button" :disabled="busy" @click="emit('deleteClip')"><Trash2 :size="15" /> 删除片段</button>
+          <div class="clip-detail-commands"><button class="button button-quiet" type="button" :disabled="busy" @click="emit('exportClip', clip)"><Download :size="15" /> 导出片段</button><button class="button button-danger" type="button" :disabled="busy" @click="emit('deleteClip')"><Trash2 :size="15" /> 删除片段</button></div>
        </div>
     </section>
   </div>
 </template>
 
 <style scoped>
-.clip-review-navigation{display:flex;align-items:center;justify-content:center;gap:12px;margin:14px 0 2px;color:#a9b8aa;font-size:12px}.clip-review-navigation .icon-button:disabled{cursor:not-allowed;opacity:.35}.clip-detail-actions{display:flex;align-items:flex-end;justify-content:space-between;gap:16px;padding-top:18px}.clip-detail-team-label{display:grid;gap:5px;margin-right:auto}.clip-detail-team-label strong{color:#dfe9df;font-size:12px}.team-assignment-editor{display:grid;justify-items:end;gap:10px}.team-assignment-actions{display:flex;gap:7px}.button-danger{color:#ffd7cf;background:#301815;border:1px solid #8d3f34}.button-danger:hover{color:#fff;background:#a33d30;border-color:#c95849}.team-choice button:disabled{cursor:not-allowed;opacity:.45}.team-choice button{display:inline-flex;align-items:center;gap:6px}
+.clip-review-navigation{display:flex;align-items:center;justify-content:center;gap:12px;margin:14px 0 2px;color:#a9b8aa;font-size:12px}.clip-review-navigation .icon-button:disabled{cursor:not-allowed;opacity:.35}.clip-detail-actions{display:flex;align-items:flex-end;justify-content:space-between;gap:16px;padding-top:18px}.clip-detail-team-label{display:grid;gap:5px;margin-right:auto}.clip-detail-team-label strong{color:#dfe9df;font-size:12px}.team-assignment-editor{display:grid;justify-items:end;gap:10px}.team-assignment-actions{display:flex;gap:7px}.clip-detail-commands{display:flex;gap:7px;flex-wrap:wrap}.button-danger{color:#ffd7cf;background:#301815;border:1px solid #8d3f34}.button-danger:hover{color:#fff;background:#a33d30;border-color:#c95849}.team-choice button:disabled{cursor:not-allowed;opacity:.45}.team-choice button{display:inline-flex;align-items:center;gap:6px}
 @media(max-width:760px){.clip-detail-actions{align-items:stretch;flex-direction:column}.button-danger{width:100%}}
 </style>

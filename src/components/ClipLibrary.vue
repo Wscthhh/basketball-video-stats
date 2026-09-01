@@ -5,7 +5,7 @@ import ClipCard from './ClipCard.vue'
 import type { Clip } from '../types'
 
 const props = defineProps<{ clips: Clip[]; busy: boolean; polling: boolean }>()
-defineEmits<{ openClip: [clip: Clip]; reanalyze: []; importClips: [] }>()
+defineEmits<{ openClip: [clip: Clip]; exportClip: [clip: Clip]; reanalyze: []; importClips: [] }>()
 
 const search = ref('')
 const filter = ref('all')
@@ -31,7 +31,7 @@ const filteredClips = computed(() => props.clips.filter((clip) =>
       </div>
     </div>
     <div v-if="filteredClips.length" class="clip-grid">
-      <ClipCard v-for="clip in filteredClips" :key="clip.id" :clip="clip" variant="library" @open="$emit('openClip', $event)" />
+        <ClipCard v-for="clip in filteredClips" :key="clip.id" :clip="clip" variant="library" @open="$emit('openClip', $event)" @export="$emit('exportClip', $event)" />
     </div>
     <div v-else class="professional-empty"><Film :size="24" /><strong>暂无符合条件的片段</strong><span>导入本场比赛视频后开始分析。</span></div>
   </section>

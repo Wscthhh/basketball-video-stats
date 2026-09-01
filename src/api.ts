@@ -1,4 +1,4 @@
-import type { Clip, ClipCollections, EventRecord, Health, Match, Run, Workspace } from './types'
+import type { Clip, ClipCollections, EventRecord, Health, Match, Run, TeamHighlightExport, Workspace } from './types'
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await fetch(path, init)
@@ -22,4 +22,7 @@ export const api = {
   updateEvent: (id: string, body: Pick<EventRecord, 'status'> & Partial<Pick<EventRecord, 'teamId' | 'playerId'>>) => request<EventRecord>(`/api/events/${encodeURIComponent(id)}`, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }),
   updateClipTeam: (id: string, teamId: string | null) => request<Clip>(`/api/clips/${encodeURIComponent(id)}`, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ teamId }) }),
   deleteClip: (id: string) => request<{ id: string; deleted: boolean }>(`/api/clips/${encodeURIComponent(id)}`, { method: 'DELETE' }),
+  downloadClipUrl: (id: string) => `/api/clips/${encodeURIComponent(id)}/download`,
+  teamHighlights: (id: string) => request<TeamHighlightExport[]>(`/api/matches/${encodeURIComponent(id)}/team-highlights`),
+  generateTeamHighlight: (matchId: string, teamId: string) => request<TeamHighlightExport>(`/api/matches/${encodeURIComponent(matchId)}/team-highlights/${encodeURIComponent(teamId)}/generate`, { method: 'POST' }),
 }

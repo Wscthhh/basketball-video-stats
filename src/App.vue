@@ -9,14 +9,16 @@ import ClipReviewQueue from './components/ClipReviewQueue.vue'
 import CreateMatchModal from './components/CreateMatchModal.vue'
 import ImportClipsModal from './components/ImportClipsModal.vue'
 import MatchOverview from './components/MatchOverview.vue'
+import TeamHighlightExports from './components/TeamHighlightExports.vue'
 import WorkspaceHeader from './components/WorkspaceHeader.vue'
-import type { Clip, ClipCollections, CreateMatchDraft, Health, Match, Run, TabKey, Workspace } from './types'
+import type { Clip, ClipCollections, CreateMatchDraft, Health, Match, Run, TabKey, TeamHighlightExport, Workspace } from './types'
 
 const tab = ref<TabKey>('overview')
 const matches = ref<Match[]>([])
 const match = ref<Match | null>(null)
 const workspace = ref<Workspace | null>(null)
 const collections = ref<ClipCollections | null>(null)
+const teamHighlights = ref<TeamHighlightExport[]>([])
 const health = ref<Health | null>(null)
 const loadError = ref('')
 const actionError = ref('')
@@ -26,6 +28,7 @@ const showImport = ref(false)
 const pendingFiles = ref<File[]>([])
 const busy = ref(false)
 const pollTimer = ref<number>()
+const exportPollTimer = ref<number>()
 const pollingRunId = ref('')
 const createDraft = ref<CreateMatchDraft>({
   name: '',
@@ -65,13 +68,16 @@ function fallbackCollections(result: Workspace): ClipCollections {
 async function loadWorkspace(matchId: string) {
   loadError.value = ''
   try {
-    const [result, collectionResponse] = await Promise.all([
+    const [result, collectionResponse, exportResponse] = await Promise.all([
       api.workspace(matchId),
       api.clipCollections(matchId).catch(() => null),
+      api.teamHighlights(matchId).catch(() => []),
     ])
     workspace.value = result
     match.value = result.match
     collections.value = collectionResponse ?? fallbackCollections(result)
+    teamHighlights.value = exportResponse
+    if (teamHighlights.value.some((item) => item.status === 'queued' || item.status === 'running')) startExportPolling()
     if (activeClipId.value && !result.clips.some((clip) => clip.id === activeClipId.value)) activeClipId.value = ''
     const activeRun = result.runs.find((run) => run.status === 'running')
     if (activeRun && pollingRunId.value !== activeRun.id) startPolling(activeRun.id)
@@ -80,6 +86,25 @@ async function loadWorkspace(matchId: string) {
     workspace.value = null
     collections.value = null
   }
+}
+
+function stopExportPolling() {
+  if (exportPollTimer.value) window.clearTimeout(exportPollTimer.value)
+  exportPollTimer.value = undefined
+}
+
+function startExportPolling() {
+  stopExportPolling()
+  const poll = async () => {
+    if (!match.value) return
+    try {
+      teamHighlights.value = await api.teamHighlights(match.value.id)
+      if (teamHighlights.value.some((item) => item.status === 'queued' || item.status === 'running')) exportPollTimer.value = window.setTimeout(() => void poll(), 1200)
+    } catch (error) {
+      fail(error)
+    }
+  }
+  void poll()
 }
 
 async function boot() {
@@ -198,6 +223,23 @@ function openClip(clip: Clip) {
   activeClipId.value = clip.id
 }
 
+function exportClip(clip: Clip) {
+  window.location.href = api.downloadClipUrl(clip.id)
+}
+
+async function generateTeamHighlight(teamId: string) {
+  if (!match.value || busy.value) return
+  busy.value = true
+  try {
+    await api.generateTeamHighlight(match.value.id, teamId)
+    startExportPolling()
+  } catch (error) {
+    fail(error)
+  } finally {
+    busy.value = false
+  }
+}
+
 function navigateReviewClip(direction: -1 | 1) {
   const index = unresolvedClips.value.findIndex((clip) => clip.id === activeClipId.value)
   const target = unresolvedClips.value[index + direction]
@@ -268,7 +310,7 @@ async function deleteActiveClip() {
 }
 
 onMounted(boot)
-onBeforeUnmount(stopPolling)
+onBeforeUnmount(() => { stopPolling(); stopExportPolling() })
 </script>
 
 <template>
@@ -281,9 +323,9 @@ onBeforeUnmount(stopPolling)
         <div v-if="actionError" class="error-banner"><CircleAlert :size="17" />{{ actionError }}<button class="icon-button" type="button" title="关闭" @click="actionError = ''"><X :size="16" /></button></div>
         <template v-if="match && workspace">
           <WorkspaceHeader :match="match" :clip-count="clips.length" :home-clip-count="homeClips.length" :away-clip-count="awayClips.length" :unresolved-count="unresolvedClips.length" :busy="busy" :polling="Boolean(pollingRunId)" @reanalyze="reanalyzeAll" @import-clips="showImport = true" />
-          <MatchOverview v-if="tab === 'overview'" :home-team="homeTeam" :away-team="awayTeam" :home-clips="homeClips" :away-clips="awayClips" :unresolved-clips="unresolvedClips" @open-clip="openClip" />
+           <template v-if="tab === 'overview'"><MatchOverview :home-team="homeTeam" :away-team="awayTeam" :home-clips="homeClips" :away-clips="awayClips" :unresolved-clips="unresolvedClips" @open-clip="openClip" @export-clip="exportClip" /><TeamHighlightExports :home-team="homeTeam" :away-team="awayTeam" :exports="teamHighlights" :busy="busy" @generate="generateTeamHighlight" /></template>
           <ClipReviewQueue v-else-if="tab === 'review'" :clips="unresolvedClips" @open-clip="openClip" />
-          <ClipLibrary v-else :clips="clips" :busy="busy" :polling="Boolean(pollingRunId)" @open-clip="openClip" @reanalyze="reanalyzeAll" @import-clips="showImport = true" />
+           <ClipLibrary v-else :clips="clips" :busy="busy" :polling="Boolean(pollingRunId)" @open-clip="openClip" @export-clip="exportClip" @reanalyze="reanalyzeAll" @import-clips="showImport = true" />
         </template>
         <div v-else-if="!loadError" class="professional-empty page-empty"><Activity :size="28" /><strong>尚未创建比赛</strong><span>先录入两队信息，再导入真实视频。</span></div>
       </div>
@@ -291,6 +333,6 @@ onBeforeUnmount(stopPolling)
 
     <CreateMatchModal v-if="showCreate" v-model:draft="createDraft" :busy="busy" @close="showCreate = false" @submit="createMatch" />
     <ImportClipsModal v-if="showImport" :files="pendingFiles" :busy="busy" @close="showImport = false" @select-files="pendingFiles = $event" @upload="upload" />
-    <ClipPreviewModal v-if="activeClip" :clip="activeClip" :home-team="homeTeam" :away-team="awayTeam" :busy="busy" :review-clips="unresolvedClips" @close="closeClip" @confirm-team="confirmClipTeam" @save-team="reassignClipTeam" @start-reassign="startReassign" @cancel-reassign="cancelReassign" @delete-clip="deleteActiveClip" @navigate="navigateReviewClip" />
+    <ClipPreviewModal v-if="activeClip" :clip="activeClip" :home-team="homeTeam" :away-team="awayTeam" :busy="busy" :review-clips="unresolvedClips" @close="closeClip" @confirm-team="confirmClipTeam" @save-team="reassignClipTeam" @start-reassign="startReassign" @cancel-reassign="cancelReassign" @delete-clip="deleteActiveClip" @export-clip="exportClip" @navigate="navigateReviewClip" />
   </div>
 </template>

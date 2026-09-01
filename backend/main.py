@@ -4,6 +4,7 @@ import asyncio
 import hashlib
 import json
 import os
+import re
 import shutil
 import sqlite3
 import subprocess
@@ -12,9 +13,10 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Annotated, Any, Literal
 
-from fastapi import FastAPI, File, HTTPException, UploadFile
+from fastapi import BackgroundTasks, FastAPI, File, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
+from fastapi.responses import FileResponse
 from pydantic import BaseModel, ConfigDict, Field
 
 from .analyzer import BasketballAnalyzer, classify_clip_team, resolve_command
@@ -26,15 +28,18 @@ UPLOAD_DIR = DATA_DIR / "uploads"
 COVERS_DIR = DATA_DIR / "covers"
 CATEGORY_DATA_DIR = DATA_DIR / "training" / "review"
 CLIP_TEAM_DATA_DIR = DATA_DIR / "training" / "clip-team"
+EXPORT_DIR = DATA_DIR / "exports"
 DB_PATH = DATA_DIR / "courttrace.sqlite3"
 UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 COVERS_DIR.mkdir(parents=True, exist_ok=True)
 CATEGORY_DATA_DIR.mkdir(parents=True, exist_ok=True)
 CLIP_TEAM_DATA_DIR.mkdir(parents=True, exist_ok=True)
+EXPORT_DIR.mkdir(parents=True, exist_ok=True)
 app = FastAPI(title="COURTTRACE Local Analysis API", version="0.2.0")
 app.add_middleware(CORSMiddleware, allow_origins=["http://127.0.0.1:5173", "http://localhost:5173"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
 app.mount("/media", StaticFiles(directory=UPLOAD_DIR), name="media")
 app.mount("/media-covers", StaticFiles(directory=COVERS_DIR), name="media-covers")
+app.mount("/media-exports", StaticFiles(directory=EXPORT_DIR), name="media-exports")
 ANALYZER = BasketballAnalyzer()
 
 
@@ -62,7 +67,8 @@ def init_db() -> None:
         CREATE TABLE IF NOT EXISTS event_revisions (id TEXT PRIMARY KEY, event_id TEXT NOT NULL, status TEXT NOT NULL, payload TEXT NOT NULL, created_at TEXT NOT NULL, FOREIGN KEY(event_id) REFERENCES analysis_events(id));
          CREATE TABLE IF NOT EXISTS review_samples (id TEXT PRIMARY KEY, match_id TEXT NOT NULL, clip_id TEXT NOT NULL, event_id TEXT NOT NULL UNIQUE, label TEXT NOT NULL, shot_type TEXT, player_id TEXT, seconds REAL NOT NULL, metadata_json TEXT NOT NULL DEFAULT '{}', created_at TEXT NOT NULL, FOREIGN KEY(match_id) REFERENCES matches(id), FOREIGN KEY(clip_id) REFERENCES clips(id), FOREIGN KEY(event_id) REFERENCES analysis_events(id));
          CREATE TABLE IF NOT EXISTS clip_review_samples (id TEXT PRIMARY KEY, match_id TEXT NOT NULL, clip_id TEXT NOT NULL UNIQUE, team_id TEXT NOT NULL, label TEXT NOT NULL, frames_json TEXT NOT NULL DEFAULT '[]', metadata_json TEXT NOT NULL DEFAULT '{}', created_at TEXT NOT NULL, updated_at TEXT NOT NULL, FOREIGN KEY(match_id) REFERENCES matches(id), FOREIGN KEY(clip_id) REFERENCES clips(id), FOREIGN KEY(team_id) REFERENCES teams(id));
-         """)
+         CREATE TABLE IF NOT EXISTS team_highlight_exports (id TEXT PRIMARY KEY, match_id TEXT NOT NULL, team_id TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'queued', progress REAL NOT NULL DEFAULT 0, clip_ids_json TEXT NOT NULL DEFAULT '[]', output_path TEXT, error TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL, updated_at TEXT NOT NULL, FOREIGN KEY(match_id) REFERENCES matches(id), FOREIGN KEY(team_id) REFERENCES teams(id));
+          """)
         run_columns = {r["name"] for r in c.execute("PRAGMA table_info(analysis_runs)")}
         clip_columns = {r["name"] for r in c.execute("PRAGMA table_info(clips)")}
         for name, definition in {"team_id": "TEXT", "team_source": "TEXT", "team_confidence": "REAL NOT NULL DEFAULT 0", "team_evidence": "TEXT"}.items():
@@ -445,6 +451,83 @@ async def clip_collections(match_id: str) -> dict[str, Any]:
             side = team_sides.get(row["team_id"])
             groups[side]["clips"].append(clip) if clip_team_is_confirmed(row) and side in ("home", "away") else groups["unresolved"].append(clip)
         return groups
+
+
+def export_payload(row: sqlite3.Row) -> dict[str, Any]:
+    value = camel(row)
+    value["clipIds"] = json.loads(row["clip_ids_json"] or "[]")
+    value["downloadUrl"] = f"/media-exports/{row['match_id']}/{row['id']}.mp4" if row["output_path"] and row["status"] == "completed" else None
+    return value
+
+
+def highlight_output_name(team_name: str) -> str:
+    clean = re.sub(r"[^0-9A-Za-z_-]+", "-", team_name).strip("-")
+    return clean or "team-highlight"
+
+
+def generate_team_highlight(export_id: str, match_id: str, team_id: str, clip_ids: list[str], output_path: str) -> None:
+    try:
+        ffmpeg = resolve_command("ffmpeg")
+        if not ffmpeg:
+            raise RuntimeError("未找到 FFmpeg，无法生成球队集锦")
+        export_file = Path(output_path)
+        export_file.parent.mkdir(parents=True, exist_ok=True)
+        concat_file = export_file.with_suffix(".txt")
+        with concat_file.open("w", encoding="utf-8") as handle:
+            with db() as c:
+                rows = c.execute("SELECT stored_path FROM clips WHERE match_id=? AND id IN ({}) AND team_id=? AND team_source='manual' ORDER BY created_at".format(",".join("?" for _ in clip_ids)), [match_id, *clip_ids, team_id]).fetchall()
+            for row in rows:
+                path = Path(row["stored_path"]).resolve().as_posix().replace("'", "'\\''")
+                handle.write(f"file '{path}'\n")
+        with db() as c:
+            c.execute("UPDATE team_highlight_exports SET status='running',progress=10,updated_at=? WHERE id=?", (now(), export_id))
+        command = [ffmpeg, "-hide_banner", "-loglevel", "error", "-y", "-f", "concat", "-safe", "0", "-i", str(concat_file), "-c:v", "libx264", "-preset", "fast", "-crf", "20", "-c:a", "aac", "-movflags", "+faststart", str(export_file)]
+        subprocess.run(command, check=True, timeout=1800)
+        with db() as c:
+            c.execute("UPDATE team_highlight_exports SET status='completed',progress=100,output_path=?,updated_at=? WHERE id=?", (str(export_file), now(), export_id))
+    except Exception as error:
+        with db() as c:
+            c.execute("UPDATE team_highlight_exports SET status='failed',error=?,updated_at=? WHERE id=?", (str(error), now(), export_id))
+    finally:
+        Path(output_path).with_suffix(".txt").unlink(missing_ok=True)
+
+
+@app.get("/api/clips/{clip_id}/download")
+async def download_clip(clip_id: str) -> FileResponse:
+    with db() as c:
+        clip = c.execute("SELECT filename,stored_path FROM clips WHERE id=?", (clip_id,)).fetchone()
+    if not clip or not Path(clip["stored_path"]).is_file():
+        raise HTTPException(404, "clip file not found")
+    return FileResponse(clip["stored_path"], media_type="video/mp4", filename=clip["filename"])
+
+
+@app.get("/api/matches/{match_id}/team-highlights")
+async def list_team_highlights(match_id: str) -> list[dict[str, Any]]:
+    with db() as c:
+        require_match(match_id, c)
+        return [export_payload(row) for row in c.execute("SELECT * FROM team_highlight_exports WHERE match_id=? ORDER BY created_at DESC", (match_id,))]
+
+
+@app.post("/api/matches/{match_id}/team-highlights/{team_id}/generate")
+async def create_team_highlight(match_id: str, team_id: str, background_tasks: BackgroundTasks) -> dict[str, Any]:
+    with db() as c:
+        require_match(match_id, c)
+        team = c.execute("SELECT * FROM teams WHERE id=? AND match_id=?", (team_id, match_id)).fetchone()
+        if not team:
+            raise HTTPException(404, "team not found")
+        clips = c.execute("SELECT id FROM clips WHERE match_id=? AND team_id=? AND team_source='manual' ORDER BY created_at", (match_id, team_id)).fetchall()
+        if not clips:
+            raise HTTPException(422, "没有已确认归属的片段")
+        previous = c.execute("SELECT * FROM team_highlight_exports WHERE match_id=? AND team_id=? AND status IN ('queued','running') ORDER BY created_at DESC LIMIT 1", (match_id, team_id)).fetchone()
+        if previous:
+            return export_payload(previous)
+        export_id = uuid.uuid4().hex
+        output_dir = EXPORT_DIR / match_id
+        output_path = output_dir / f"{export_id}.mp4"
+        c.execute("INSERT INTO team_highlight_exports(id,match_id,team_id,status,progress,clip_ids_json,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?)", (export_id, match_id, team_id, "queued", 0, json.dumps([row["id"] for row in clips]), now(), now()))
+        result = export_payload(c.execute("SELECT * FROM team_highlight_exports WHERE id=?", (export_id,)).fetchone())
+    background_tasks.add_task(generate_team_highlight, export_id, match_id, team_id, result["clipIds"], str(output_path))
+    return result
 
 
 @app.post("/api/matches/{match_id}/clips")

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { Film, Play } from 'lucide-vue-next'
+import { Download, Film, Play } from 'lucide-vue-next'
 import { clipSource, formatSeconds, statusLabel } from '../presentation'
 import type { Clip } from '../types'
 
@@ -8,7 +8,7 @@ const props = withDefaults(defineProps<{ clip: Clip; variant?: 'highlight' | 'li
   emptyEvidence: '已归属该球队',
 })
 
-defineEmits<{ open: [clip: Clip] }>()
+defineEmits<{ open: [clip: Clip]; export: [clip: Clip] }>()
 </script>
 
 <template>
@@ -19,7 +19,7 @@ defineEmits<{ open: [clip: Clip] }>()
     </div>
     <div class="clip-card-copy">
       <div><strong>{{ clip.name }}</strong><small>{{ formatSeconds(clip.duration ?? clip.durationSeconds) }}</small></div>
-      <span>{{ statusLabel(clip.status) }}</span>
+       <span class="clip-card-footer"><span>{{ statusLabel(clip.status) }}</span><button class="icon-button dark" type="button" title="导出片段" @click.stop="$emit('export', clip)"><Download :size="14" /></button></span>
     </div>
   </button>
   <article v-else class="team-highlight-card" role="button" tabindex="0" @click="$emit('open', clip)" @keydown.enter="$emit('open', clip)" @keydown.space.prevent="$emit('open', clip)">
@@ -30,8 +30,9 @@ defineEmits<{ open: [clip: Clip] }>()
     </span>
     <span class="team-highlight-copy">
       <small>{{ statusLabel(clip.status) }} · {{ clipSource(clip) }}</small>
-      <strong>{{ clip.name }}</strong>
-      <small>{{ clip.teamEvidence || emptyEvidence }}</small>
+       <strong>{{ clip.name }}</strong>
+       <small>{{ clip.teamEvidence || emptyEvidence }}</small>
+       <button class="icon-button dark clip-export-button" type="button" title="导出片段" @click.stop="$emit('export', clip)"><Download :size="14" /></button>
     </span>
   </article>
 </template>
