@@ -83,7 +83,7 @@ def init_db() -> None:
                 c.execute(f"ALTER TABLE analysis_runs ADD COLUMN {name} {definition}")
         # Existing installations have no parent match table and old event columns.
         for name, definition in {
-            "team_id": "TEXT", "team_source": "TEXT", "points": "INTEGER", "shot_type": "TEXT", "shot_type_confidence": "REAL NOT NULL DEFAULT 0", "shot_type_source": "TEXT", "court_x": "REAL", "court_y": "REAL", "homography_confidence": "REAL NOT NULL DEFAULT 0", "release_frame": "INTEGER", "run_id": "TEXT", "fingerprint": "TEXT", "highlight_start": "REAL", "highlight_end": "REAL", "confirmed_at": "TEXT", "updated_at": "TEXT", "local_track_key": "TEXT", "confirmed_by": "TEXT", "confirmation_rule": "TEXT"
+            "team_id": "TEXT", "team_source": "TEXT", "team_confidence": "REAL NOT NULL DEFAULT 0", "team_evidence": "TEXT NOT NULL DEFAULT ''", "points": "INTEGER", "shot_type": "TEXT", "shot_type_confidence": "REAL NOT NULL DEFAULT 0", "shot_type_source": "TEXT", "court_x": "REAL", "court_y": "REAL", "homography_confidence": "REAL NOT NULL DEFAULT 0", "release_frame": "INTEGER", "run_id": "TEXT", "fingerprint": "TEXT", "highlight_start": "REAL", "highlight_end": "REAL", "confirmed_at": "TEXT", "updated_at": "TEXT", "local_track_key": "TEXT", "confirmed_by": "TEXT", "confirmation_rule": "TEXT"
         }.items():
             if name not in {r["name"] for r in c.execute("PRAGMA table_info(analysis_events)")}:
                 c.execute(f"ALTER TABLE analysis_events ADD COLUMN {name} {definition}")
@@ -666,6 +666,8 @@ def event_payload(r: sqlite3.Row, c: sqlite3.Connection | None = None) -> dict[s
         if clip:
             value["previewUrl"] = f"/media/{clip['match_id']}/{r['clip_id']}/{clip['filename']}"
         value["teamSource"] = r["team_source"] or ("unassigned" if not r["team_id"] else ("manual" if r["confirmed_by"] == "manual" or r["source"] == "manual" else "ai"))
+        value["teamConfidence"] = r["team_confidence"] if "team_confidence" in r.keys() else 0
+        value["teamEvidence"] = r["team_evidence"] if "team_evidence" in r.keys() else ""
     return value
 
 
@@ -1044,6 +1046,18 @@ def infer_team_id(c: sqlite3.Connection, match_id: str, rgb: tuple[float, float,
     return classify_team(rgb, teams, learned_team_prototypes(c, match_id)).team_id
 
 
+def infer_event_team(c: sqlite3.Connection, match_id: str, track: Any, player_team_id: str | None) -> tuple[str | None, float, str]:
+    teams = [dict(row) for row in c.execute("SELECT id,color FROM teams WHERE match_id=? AND color IS NOT NULL", (match_id,)).fetchall()]
+    if not track or track.jersey_rgb is None or not teams:
+        return player_team_id, 0, "缺少出手球员球衣颜色证据"
+    decision = classify_team(track.jersey_rgb, teams, learned_team_prototypes(c, match_id))
+    if decision.team_id is None:
+        return player_team_id, decision.confidence, "出手球员球衣颜色无法区分球队"
+    if player_team_id and player_team_id != decision.team_id:
+        return None, 0, "出手球员身份与球衣颜色球队判断冲突"
+    return decision.team_id, decision.confidence, f"出手轨迹 {track.local_track_key} 的球衣颜色匹配球队"
+
+
 async def run_analysis(run_id: str, match_id: str, clip_ids: list[str], device: str) -> None:
     errors: dict[str, str] = {}
     try:
@@ -1116,9 +1130,11 @@ async def run_analysis(run_id: str, match_id: str, clip_ids: list[str], device: 
                     event_type = {"投篮": "attempt", "命中": "make"}.get(candidate.event_type, candidate.event_type)
                     fingerprint = f"{clip_id}/{event_type}/{int(candidate.seconds/0.2)}/{candidate.source}"
                     existing = c.execute("SELECT * FROM analysis_events WHERE fingerprint=?", (fingerprint,)).fetchone()
-                    event_team_id = c.execute("SELECT team_id FROM players WHERE id=?", (track_players.get(candidate.local_track_key),)).fetchone() if candidate.local_track_key else None
-                    inferred_team_id = event_team_id["team_id"] if event_team_id else None
                     player_id = track_players.get(candidate.local_track_key)
+                    event_team_id = c.execute("SELECT team_id FROM players WHERE id=?", (player_id,)).fetchone() if player_id else None
+                    player_team_id = event_team_id["team_id"] if event_team_id else None
+                    shooter_track = next((track for track in inspection.tracks if track.local_track_key == candidate.local_track_key), None)
+                    inferred_team_id, team_confidence, team_evidence = infer_event_team(c, match_id, shooter_track, player_team_id)
                     confirmation = automatic_confirmation(candidate, player_id, inferred_team_id, clip["duration"])
                     if existing and (existing["confirmed_by"] == "manual" or existing["status"] == "ignored"):
                         continue
@@ -1127,6 +1143,7 @@ async def run_analysis(run_id: str, match_id: str, clip_ids: list[str], device: 
                             "event_type": event_type, "seconds": candidate.seconds, "confidence": candidate.confidence,
                             "description": candidate.description, "source": candidate.source, "run_id": run_id,
                             "local_track_key": candidate.local_track_key, "player_id": player_id, "team_id": inferred_team_id,
+                            "team_confidence": team_confidence, "team_evidence": team_evidence,
                             "court_x": candidate.court_x, "court_y": candidate.court_y,
                             "homography_confidence": candidate.homography_confidence, "release_frame": candidate.release_frame,
                             "updated_at": now(), **confirmation,
@@ -1143,12 +1160,14 @@ async def run_analysis(run_id: str, match_id: str, clip_ids: list[str], device: 
                         assignments = ",".join(f"{name}=:{name}" for name in update)
                         c.execute(f"UPDATE analysis_events SET {assignments} WHERE id=:id", {**update, "id": existing["id"]})
                     else:
-                        c.execute("INSERT INTO analysis_events(id,clip_id,event_type,seconds,confidence,status,description,source,run_id,fingerprint,local_track_key,player_id,team_id,shot_type,shot_type_confidence,shot_type_source,court_x,court_y,homography_confidence,release_frame,updated_at,points,confirmed_at,confirmed_by,confirmation_rule,highlight_start,highlight_end) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", (f"ai-{uuid.uuid4().hex}",clip_id,event_type,candidate.seconds,candidate.confidence,confirmation["status"],candidate.description,candidate.source,run_id,fingerprint,candidate.local_track_key,player_id,inferred_team_id,candidate.shot_type,candidate.shot_type_confidence,candidate.shot_type_source,candidate.court_x,candidate.court_y,candidate.homography_confidence,candidate.release_frame,now(),confirmation["points"],confirmation["confirmed_at"],confirmation["confirmed_by"],confirmation["confirmation_rule"],confirmation["highlight_start"],confirmation["highlight_end"]))
+                        c.execute("INSERT INTO analysis_events(id,clip_id,event_type,seconds,confidence,status,description,source,run_id,fingerprint,local_track_key,player_id,team_id,team_confidence,team_evidence,shot_type,shot_type_confidence,shot_type_source,court_x,court_y,homography_confidence,release_frame,updated_at,points,confirmed_at,confirmed_by,confirmation_rule,highlight_start,highlight_end) VALUES(" + ",".join("?" for _ in range(29)) + ")", (f"ai-{uuid.uuid4().hex}",clip_id,event_type,candidate.seconds,candidate.confidence,confirmation["status"],candidate.description,candidate.source,run_id,fingerprint,candidate.local_track_key,player_id,inferred_team_id,team_confidence,team_evidence,candidate.shot_type,candidate.shot_type_confidence,candidate.shot_type_source,candidate.court_x,candidate.court_y,candidate.homography_confidence,candidate.release_frame,now(),confirmation["points"],confirmation["confirmed_at"],confirmation["confirmed_by"],confirmation["confirmation_rule"],confirmation["highlight_start"],confirmation["highlight_end"]))
                 c.execute("UPDATE analysis_runs SET progress=?,completed_clips=? WHERE id=?", (round(index / max(len(clip_ids), 1) * 100, 1), index, run_id))
             shutil.rmtree(analysis_dir, ignore_errors=True)
         with db() as c:
             c.execute("UPDATE analysis_runs SET status=?,progress=100,error=?,details_json=?,finished_at=? WHERE id=?", ("failed" if errors else "completed", "; ".join(errors.values()), json.dumps({"errors": errors}), now(), run_id))
     except Exception as error:
+        print(f"analysis failed: {error}")
+        print(f"analysis failed: {error}")
         with db() as c:
             marks = ",".join("?" for _ in clip_ids)
             if marks:
