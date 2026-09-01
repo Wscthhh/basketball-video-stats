@@ -12,7 +12,7 @@ function latest(teamId?: string) {
 
 <template>
   <section class="tool-panel team-export-panel">
-    <div class="panel-header"><div><div class="panel-kicker">TEAM HIGHLIGHT EXPORTS</div><h2>球队集锦合集</h2></div><span class="highlight-count">仅包含已确认片段</span></div>
+    <div class="panel-header"><div><div class="panel-kicker">TEAM HIGHLIGHT EXPORTS</div><h2>球队集锦合集</h2></div><span class="highlight-count">包含 AI 归属和已确认片段</span></div>
     <div class="team-export-grid">
       <article v-for="team in [homeTeam, awayTeam]" :key="team?.id" class="team-export-card">
         <div class="team-export-heading"><div><strong>{{ team?.name || '球队' }}</strong><small>确认片段合集</small></div><button class="button button-quiet" type="button" :disabled="busy || !team?.id" @click="$emit('generate', team!.id!)"><WandSparkles :size="15" />{{ latest(team?.id)?.status === 'running' || latest(team?.id)?.status === 'queued' ? '生成中' : '生成合集' }}</button></div>

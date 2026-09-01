@@ -46,12 +46,10 @@ const analysisRun = computed(() => runs.value.find((run) => run.id === pollingRu
 const activeClip = computed(() => clips.value.find((clip) => clip.id === activeClipId.value) ?? null)
 const homeTeam = computed(() => workspace.value?.teams.find((team) => team.side === 'home') ?? match.value?.homeTeam)
 const awayTeam = computed(() => workspace.value?.teams.find((team) => team.side === 'away') ?? match.value?.awayTeam)
-const isConfirmedClip = (clip: Clip) => clip.teamConfirmed === true || clip.teamSource === 'manual'
-const unresolvedClips = computed(() => collections.value?.unresolved ?? clips.value.filter((clip) => !isConfirmedClip(clip)))
-const homeClips = computed(() => collections.value?.home.clips ?? clips.value.filter((clip) => isConfirmedClip(clip) && clip.teamId === homeTeam.value?.id))
-const awayClips = computed(() => collections.value?.away.clips ?? clips.value.filter((clip) => isConfirmedClip(clip) && clip.teamId === awayTeam.value?.id))
-const pendingHomeCount = computed(() => unresolvedClips.value.filter((clip) => clip.teamId === homeTeam.value?.id).length)
-const pendingAwayCount = computed(() => unresolvedClips.value.filter((clip) => clip.teamId === awayTeam.value?.id).length)
+const hasTeamAssignment = (clip: Clip) => Boolean(clip.teamId) && ['ai', 'manual'].includes(clip.teamSource ?? '')
+const unresolvedClips = computed(() => collections.value?.unresolved ?? clips.value.filter((clip) => !hasTeamAssignment(clip)))
+const homeClips = computed(() => collections.value?.home.clips ?? clips.value.filter((clip) => hasTeamAssignment(clip) && clip.teamId === homeTeam.value?.id))
+const awayClips = computed(() => collections.value?.away.clips ?? clips.value.filter((clip) => hasTeamAssignment(clip) && clip.teamId === awayTeam.value?.id))
 const readyModels = computed(() => Object.entries(health.value?.analyzer?.models ?? {}).filter(([, model]) => model.ready).map(([name]) => name).join(' / '))
 
 function fail(error: unknown) {
@@ -62,9 +60,9 @@ function fallbackCollections(result: Workspace): ClipCollections {
   const homeId = result.match.homeTeam.id ?? result.teams.find((team) => team.side === 'home')?.id
   const awayId = result.match.awayTeam.id ?? result.teams.find((team) => team.side === 'away')?.id
   return {
-    home: { team: result.match.homeTeam, clips: result.clips.filter((clip) => isConfirmedClip(clip) && clip.teamId === homeId) },
-    away: { team: result.match.awayTeam, clips: result.clips.filter((clip) => isConfirmedClip(clip) && clip.teamId === awayId) },
-    unresolved: result.clips.filter((clip) => !isConfirmedClip(clip) || (clip.teamId !== homeId && clip.teamId !== awayId)),
+    home: { team: result.match.homeTeam, clips: result.clips.filter((clip) => hasTeamAssignment(clip) && clip.teamId === homeId) },
+    away: { team: result.match.awayTeam, clips: result.clips.filter((clip) => hasTeamAssignment(clip) && clip.teamId === awayId) },
+    unresolved: result.clips.filter((clip) => !hasTeamAssignment(clip)),
   }
 }
 
@@ -326,7 +324,7 @@ onBeforeUnmount(() => { stopPolling(); stopExportPolling() })
         <div v-if="actionError" class="error-banner"><CircleAlert :size="17" />{{ actionError }}<button class="icon-button" type="button" title="关闭" @click="actionError = ''"><X :size="16" /></button></div>
         <template v-if="match && workspace">
            <WorkspaceHeader :match="match" :clip-count="clips.length" :home-clip-count="homeClips.length" :away-clip-count="awayClips.length" :unresolved-count="unresolvedClips.length" :busy="busy" :polling="Boolean(pollingRunId)" :analysis-run="analysisRun" @reanalyze="reanalyzeAll" @import-clips="showImport = true" />
-           <template v-if="tab === 'overview'"><TeamHighlightExports :home-team="homeTeam" :away-team="awayTeam" :exports="teamHighlights" :busy="busy" @generate="generateTeamHighlight" /><MatchOverview :home-team="homeTeam" :away-team="awayTeam" :home-clips="homeClips" :away-clips="awayClips" :unresolved-clips="unresolvedClips" :pending-home-count="pendingHomeCount" :pending-away-count="pendingAwayCount" @open-clip="openClip" @export-clip="exportClip" /></template>
+           <template v-if="tab === 'overview'"><TeamHighlightExports :home-team="homeTeam" :away-team="awayTeam" :exports="teamHighlights" :busy="busy" @generate="generateTeamHighlight" /><MatchOverview :home-team="homeTeam" :away-team="awayTeam" :home-clips="homeClips" :away-clips="awayClips" :unresolved-clips="unresolvedClips" @open-clip="openClip" @export-clip="exportClip" /></template>
           <ClipReviewQueue v-else-if="tab === 'review'" :clips="unresolvedClips" @open-clip="openClip" />
            <ClipLibrary v-else :clips="clips" :busy="busy" :polling="Boolean(pollingRunId)" @open-clip="openClip" @export-clip="exportClip" @reanalyze="reanalyzeAll" @import-clips="showImport = true" />
         </template>

@@ -11,8 +11,6 @@ const props = defineProps<{
   homeClips: Clip[]
   awayClips: Clip[]
   unresolvedClips: Clip[]
-  pendingHomeCount: number
-  pendingAwayCount: number
 }>()
 
 defineEmits<{ openClip: [clip: Clip]; exportClip: [clip: Clip] }>()
@@ -49,13 +47,13 @@ watch(unresolvedPageCount, (count) => { unresolvedPage.value = Math.min(unresolv
   <section class="tool-panel team-overview-panel">
     <div class="overview-columns">
       <div class="overview-column">
-        <div class="panel-header"><div><div class="panel-kicker">主队片段</div><h2 class="team-overview-title"><TeamColorSwatch :color="homeTeam?.color" />{{ homeTeam?.name || '主队' }} · 片段集锦 <small v-if="pendingHomeCount">待确认 {{ pendingHomeCount }} 个</small></h2></div><span class="highlight-count">{{ homeClips.length }} 个片段</span></div>
+        <div class="panel-header"><div><div class="panel-kicker">主队片段</div><h2 class="team-overview-title"><TeamColorSwatch :color="homeTeam?.color" />{{ homeTeam?.name || '主队' }} · 片段集锦</h2></div><span class="highlight-count">{{ homeClips.length }} 个片段</span></div>
         <div v-if="homeClips.length" class="team-highlight-grid"><ClipCard v-for="clip in visibleHomeClips" :key="clip.id" :clip="clip" @open="$emit('openClip', $event)" @export="$emit('exportClip', $event)" /></div>
         <div v-else class="professional-empty team-highlight-empty"><Film :size="24" /><strong>暂无主队片段</strong><span>归属后的真实视频会显示在这里。</span></div>
         <div v-if="homeClips.length > pageSize" class="overview-pagination"><button class="icon-button dark" type="button" title="上一页" :disabled="homePage === 1" @click="changePage('home', -1)"><ChevronLeft :size="15" /></button><span>{{ homePage }} / {{ homePageCount }}</span><button class="icon-button dark" type="button" title="下一页" :disabled="homePage === homePageCount" @click="changePage('home', 1)"><ChevronRight :size="15" /></button></div>
       </div>
       <div class="overview-column">
-        <div class="panel-header"><div><div class="panel-kicker">客队片段</div><h2 class="team-overview-title"><TeamColorSwatch :color="awayTeam?.color" />{{ awayTeam?.name || '客队' }} · 片段集锦 <small v-if="pendingAwayCount">待确认 {{ pendingAwayCount }} 个</small></h2></div><span class="highlight-count">{{ awayClips.length }} 个片段</span></div>
+        <div class="panel-header"><div><div class="panel-kicker">客队片段</div><h2 class="team-overview-title"><TeamColorSwatch :color="awayTeam?.color" />{{ awayTeam?.name || '客队' }} · 片段集锦</h2></div><span class="highlight-count">{{ awayClips.length }} 个片段</span></div>
         <div v-if="awayClips.length" class="team-highlight-grid"><ClipCard v-for="clip in visibleAwayClips" :key="clip.id" :clip="clip" @open="$emit('openClip', $event)" @export="$emit('exportClip', $event)" /></div>
         <div v-else class="professional-empty team-highlight-empty"><Film :size="24" /><strong>暂无客队片段</strong><span>归属后的真实视频会显示在这里。</span></div>
         <div v-if="awayClips.length > pageSize" class="overview-pagination"><button class="icon-button dark" type="button" title="上一页" :disabled="awayPage === 1" @click="changePage('away', -1)"><ChevronLeft :size="15" /></button><span>{{ awayPage }} / {{ awayPageCount }}</span><button class="icon-button dark" type="button" title="下一页" :disabled="awayPage === awayPageCount" @click="changePage('away', 1)"><ChevronRight :size="15" /></button></div>
@@ -71,5 +69,5 @@ watch(unresolvedPageCount, (count) => { unresolvedPage.value = Math.min(unresolv
 </template>
 
 <style scoped>
-.team-overview-title{display:flex;align-items:center;gap:8px;flex-wrap:wrap}.team-overview-title small,.overview-unresolved h2 small{color:#ffc766;font-size:10px;font-weight:500;white-space:nowrap}.overview-pagination{display:flex;align-items:center;justify-content:center;gap:10px;padding:0 16px 16px;color:#94a299;font-size:11px}.overview-pagination .icon-button:disabled{cursor:not-allowed;opacity:.35}
+.team-overview-title{display:flex;align-items:center;gap:8px;flex-wrap:wrap}.overview-unresolved h2 small{color:#ffc766;font-size:10px;font-weight:500;white-space:nowrap}.overview-pagination{display:flex;align-items:center;justify-content:center;gap:10px;padding:0 16px 16px;color:#94a299;font-size:11px}.overview-pagination .icon-button:disabled{cursor:not-allowed;opacity:.35}
 </style>

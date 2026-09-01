@@ -179,6 +179,10 @@ def clip_team_is_confirmed(row: sqlite3.Row) -> bool:
     return row["team_source"] == "manual"
 
 
+def clip_has_team_assignment(row: sqlite3.Row) -> bool:
+    return row["team_id"] is not None and row["team_source"] in ("ai", "manual")
+
+
 def capture_clip_team_sample(clip: sqlite3.Row, sample_dir: Path) -> list[str]:
     frames: list[str] = []
     sample_dir.mkdir(parents=True, exist_ok=True)
@@ -449,7 +453,7 @@ async def clip_collections(match_id: str) -> dict[str, Any]:
         for row in c.execute("SELECT * FROM clips WHERE match_id=? ORDER BY created_at DESC", (match_id,)):
             clip = clip_payload(row)
             side = team_sides.get(row["team_id"])
-            groups[side]["clips"].append(clip) if clip_team_is_confirmed(row) and side in ("home", "away") else groups["unresolved"].append(clip)
+            groups[side]["clips"].append(clip) if clip_has_team_assignment(row) and side in ("home", "away") else groups["unresolved"].append(clip)
         return groups
 
 
@@ -475,7 +479,7 @@ def generate_team_highlight(export_id: str, match_id: str, team_id: str, clip_id
         concat_file = export_file.with_suffix(".txt")
         with concat_file.open("w", encoding="utf-8") as handle:
             with db() as c:
-                rows = c.execute("SELECT stored_path FROM clips WHERE match_id=? AND id IN ({}) AND team_id=? AND team_source='manual' ORDER BY created_at".format(",".join("?" for _ in clip_ids)), [match_id, *clip_ids, team_id]).fetchall()
+                rows = c.execute("SELECT stored_path FROM clips WHERE match_id=? AND id IN ({}) AND team_id=? AND team_source IN ('ai','manual') ORDER BY CASE team_source WHEN 'ai' THEN 0 ELSE 1 END, created_at".format(",".join("?" for _ in clip_ids)), [match_id, *clip_ids, team_id]).fetchall()
             for row in rows:
                 path = Path(row["stored_path"]).resolve().as_posix().replace("'", "'\\''")
                 handle.write(f"file '{path}'\n")
@@ -515,7 +519,7 @@ async def create_team_highlight(match_id: str, team_id: str, background_tasks: B
         team = c.execute("SELECT * FROM teams WHERE id=? AND match_id=?", (team_id, match_id)).fetchone()
         if not team:
             raise HTTPException(404, "team not found")
-        clips = c.execute("SELECT id FROM clips WHERE match_id=? AND team_id=? AND team_source='manual' ORDER BY created_at", (match_id, team_id)).fetchall()
+        clips = c.execute("SELECT id FROM clips WHERE match_id=? AND team_id=? AND team_source IN ('ai','manual') ORDER BY CASE team_source WHEN 'ai' THEN 0 ELSE 1 END, created_at", (match_id, team_id)).fetchall()
         if not clips:
             raise HTTPException(422, "没有已确认归属的片段")
         previous = c.execute("SELECT * FROM team_highlight_exports WHERE match_id=? AND team_id=? AND status IN ('queued','running') ORDER BY created_at DESC LIMIT 1", (match_id, team_id)).fetchone()
