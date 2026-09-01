@@ -11,6 +11,14 @@ let backend
 let backendPort = 8000
 let runtimeRoot
 
+function installedRuntimePath() {
+  return path.join(process.env.LOCALAPPDATA || app.getPath('userData'), 'COURTTRACE', 'runtime')
+}
+
+function log(message) {
+  try { fs.appendFileSync(path.join(app.getPath('userData'), 'desktop.log'), `[${new Date().toISOString()}] ${message}\n`) } catch (_) {}
+}
+
 function waitForBackend(port, attempts = 40) {
   return new Promise((resolve, reject) => {
     const check = () => {
@@ -35,18 +43,22 @@ function startBackend() {
   const executable = app.isPackaged ? path.join(resourceRoot, 'backend', 'CourtTraceBackend', 'CourtTraceBackend.exe') : null
   const args = executable ? ['--port', String(backendPort)] : ['-m', 'uvicorn', 'backend.main:app', '--host', '127.0.0.1', '--port', String(backendPort)]
   const ffmpegRoot = app.isPackaged ? path.join(resourceRoot, 'ffmpeg') : ''
+  log(`Starting backend: ${executable || 'python'} in ${resourceRoot}`)
   backend = spawn(executable || process.env.COURTTRACE_PYTHON || 'python', args, {
     cwd: resourceRoot,
     env: { ...process.env, PATH: ffmpegRoot ? `${ffmpegRoot}${path.delimiter}${process.env.PATH || ''}` : process.env.PATH, COURTTRACE_APP_ROOT: resourceRoot, COURTTRACE_DATA_DIR: path.join(app.getPath('userData'), 'data') },
     windowsHide: true,
     stdio: 'ignore',
   })
-  backend.on('exit', (code) => { if (code && app.isReady()) dialog.showErrorBox('COURTTRACE 后端已退出', `服务退出代码：${code}`) })
+  backend.on('error', (error) => { log(`Backend spawn error: ${error.message}`); dialog.showErrorBox('COURTTRACE 后端启动失败', error.message) })
+  backend.on('exit', (code) => { log(`Backend exited: ${code}`); if (code && app.isReady()) dialog.showErrorBox('COURTTRACE 后端已退出', `服务退出代码：${code}`) })
 }
 
 function runtimeReady() {
-  const root = path.join(app.getPath('localAppData'), 'COURTTRACE', 'runtime')
-  return fs.existsSync(path.join(root, 'backend', 'CourtTraceBackend', 'CourtTraceBackend.exe')) && fs.existsSync(path.join(root, 'ffmpeg', 'ffmpeg.exe')) && fs.existsSync(path.join(root, 'models', 'player_detector.pt'))
+  const root = installedRuntimePath()
+  const ready = fs.existsSync(path.join(root, 'backend', 'CourtTraceBackend', 'CourtTraceBackend.exe')) && fs.existsSync(path.join(root, 'ffmpeg', 'ffmpeg.exe')) && fs.existsSync(path.join(root, 'models', 'player_detector.pt'))
+  log(`Runtime check: ${root}, ready=${ready}`)
+  return ready
 }
 
 function downloadFile(url, destination) {
@@ -83,21 +95,24 @@ async function downloadRuntime(url, target) {
 }
 
 async function ensureRuntime() {
-  const installedRuntime = path.join(app.getPath('localAppData'), 'COURTTRACE', 'runtime')
-  if (!app.isPackaged || runtimeReady()) { runtimeRoot = app.isPackaged ? installedRuntime : path.join(__dirname, '..'); return true }
+  const installedRuntime = installedRuntimePath()
+  if (!app.isPackaged || runtimeReady()) { runtimeRoot = app.isPackaged ? installedRuntime : path.join(__dirname, '..'); log(`Using runtime: ${runtimeRoot}`); return true }
   const url = process.env.COURTTRACE_RUNTIME_URL || 'https://github.com/Wscthhh/basketball-video-stats/releases/download/v0.1.0/CourtTrace-Runtime-0.1.0.json'
   if (!url) {
     dialog.showErrorBox('COURTTRACE 需要运行环境', '首次启动需要下载独立 Runtime。请配置 COURTTRACE_RUNTIME_URL，或先安装 Runtime 包。')
     return false
   }
-  try { await downloadRuntime(url, installedRuntime); runtimeRoot = installedRuntime; return true } catch (error) { dialog.showErrorBox('Runtime 下载失败', error.message); return false }
+  log(`Runtime missing, downloading from ${url}`)
+  try { await downloadRuntime(url, installedRuntime); runtimeRoot = installedRuntime; log(`Runtime downloaded: ${runtimeRoot}`); return true } catch (error) { log(`Runtime download failed: ${error.message}`); dialog.showErrorBox('Runtime 下载失败', error.message); return false }
 }
 
 async function createWindow() {
-  if (!await ensureRuntime()) { app.quit(); return }
-  startBackend()
-  try { await waitForBackend(backendPort) } catch (error) { dialog.showErrorBox('COURTTRACE 启动失败', error.message); app.quit(); return }
   const window = new BrowserWindow({ width: 1440, height: 920, minWidth: 1000, minHeight: 700, webPreferences: { preload: path.join(__dirname, 'preload.cjs'), contextIsolation: true, sandbox: true, additionalArguments: [`--courttrace-api=http://127.0.0.1:${backendPort}`] } })
+  window.show()
+  log('Desktop window created')
+  if (!await ensureRuntime()) { window.destroy(); app.quit(); return }
+  startBackend()
+  try { await waitForBackend(backendPort) } catch (error) { log(`Backend startup timeout: ${error.message}`); dialog.showErrorBox('COURTTRACE 启动失败', error.message); window.destroy(); app.quit(); return }
   const indexPath = app.isPackaged ? path.join(__dirname, '..', 'dist', 'index.html') : path.join(__dirname, '..', 'dist', 'index.html')
   try {
     await window.loadFile(indexPath)
@@ -112,3 +127,5 @@ app.whenReady().then(createWindow)
 app.whenReady().then(() => { if (app.isPackaged) { autoUpdater.checkForUpdatesAndNotify().catch(() => undefined) } })
 app.on('window-all-closed', () => { if (backend) backend.kill(); if (process.platform !== 'darwin') app.quit() })
 app.on('before-quit', () => { if (backend) backend.kill() })
+process.on('uncaughtException', (error) => { log(`Uncaught exception: ${error.stack || error.message}`); dialog.showErrorBox('COURTTRACE 启动错误', error.message) })
+process.on('unhandledRejection', (error) => { log(`Unhandled rejection: ${error && (error.stack || error.message)}`) })
