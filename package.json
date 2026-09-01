@@ -13,6 +13,7 @@
     "desktop:build": "npm run build",
     "desktop:prepare-runtime": "powershell -ExecutionPolicy Bypass -File scripts/build-desktop.ps1",
     "desktop:runtime": "npm run desktop:prepare-runtime && powershell -ExecutionPolicy Bypass -File scripts/build-runtime.ps1",
+    "desktop:runtime-installer": "npm run desktop:runtime && powershell -ExecutionPolicy Bypass -File scripts/build-runtime-installer.ps1",
     "desktop:package": "npm run desktop:build && electron-builder --win nsis",
     "desktop:inno": "npm run build && powershell -ExecutionPolicy Bypass -File scripts/build-inno.ps1"
   },
@@ -42,6 +43,9 @@
       "electron/**/*",
       "package.json"
     ],
+    "extraResources": [
+      { "from": "node_modules/7zip-bin/win/x64/7za.exe", "to": "tools/7za.exe" }
+    ],
     "win": {
       "target": "nsis",
       "signAndEditExecutable": false
@@ -50,8 +54,7 @@
       "oneClick": true,
       "perMachine": false,
       "createDesktopShortcut": true,
-      "createStartMenuShortcut": true,
-      "useZip": true
+      "createStartMenuShortcut": true
     },
     "publish": [{ "provider": "github", "owner": "Wscthhh", "repo": "basketball-video-stats" }]
   }

@@ -5,6 +5,7 @@ const http = require('http')
 const fs = require('fs')
 const { execFile } = require('child_process')
 const { autoUpdater } = require('electron-updater')
+const crypto = require('crypto')
 
 let backend
 let backendPort = 8000
@@ -48,25 +49,42 @@ function runtimeReady() {
   return fs.existsSync(path.join(root, 'backend', 'CourtTraceBackend', 'CourtTraceBackend.exe')) && fs.existsSync(path.join(root, 'ffmpeg', 'ffmpeg.exe')) && fs.existsSync(path.join(root, 'models', 'player_detector.pt'))
 }
 
-function downloadRuntime(url, target) {
+function downloadFile(url, destination) {
   return new Promise((resolve, reject) => {
-    fs.mkdirSync(target, { recursive: true })
-    const archive = path.join(app.getPath('temp'), 'courttrace-runtime.zip')
-    const file = fs.createWriteStream(archive)
+    const file = fs.createWriteStream(destination)
     const request = net.request(url)
     request.on('response', (response) => {
       if (response.statusCode < 200 || response.statusCode >= 300) return reject(new Error(`Runtime 下载失败：HTTP ${response.statusCode}`))
       response.pipe(file)
-      file.on('finish', () => file.close(() => execFile('tar', ['-xf', archive, '-C', target], (error) => { fs.rmSync(archive, { force: true }); error ? reject(error) : resolve() })))
+      file.on('finish', () => file.close(resolve))
     })
     request.on('error', reject)
     request.end()
   })
 }
 
+async function downloadRuntime(url, target) {
+  fs.mkdirSync(target, { recursive: true })
+  const manifestPath = path.join(app.getPath('temp'), 'courttrace-runtime.json')
+  await downloadFile(url, manifestPath)
+  const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'))
+  const toolsRoot = app.isPackaged ? path.join(process.resourcesPath, 'tools') : path.join(__dirname, '..', 'node_modules', '7zip-bin', 'win', 'x64')
+  const extractor = path.join(toolsRoot, '7za.exe')
+  const prefix = path.join(app.getPath('temp'), 'CourtTrace-Runtime.7z')
+  for (const part of manifest.parts) {
+    const partPath = `${prefix}.${String(part.index).padStart(3, '0')}`
+    await downloadFile(new URL(part.name, url).toString(), partPath)
+    const hash = crypto.createHash('sha256').update(fs.readFileSync(partPath)).digest('hex').toLowerCase()
+    if (part.sha256 && hash !== part.sha256.toLowerCase()) throw new Error(`Runtime 分卷校验失败：${part.name}`)
+  }
+  await new Promise((resolve, reject) => execFile(extractor, ['x', `${prefix}.001`, `-o${target}`, '-y'], (error) => error ? reject(error) : resolve()))
+  for (const part of manifest.parts) fs.rmSync(`${prefix}.${String(part.index).padStart(3, '0')}`, { force: true })
+  fs.rmSync(manifestPath, { force: true })
+}
+
 async function ensureRuntime() {
   if (!app.isPackaged || runtimeReady()) { runtimeRoot = app.isPackaged ? path.join(app.getPath('userData'), 'runtime') : path.join(__dirname, '..'); return true }
-  const url = process.env.COURTTRACE_RUNTIME_URL || 'https://github.com/Wscthhh/basketball-video-stats/releases/download/v0.1.0/CourtTrace-Runtime-0.1.0.zip'
+  const url = process.env.COURTTRACE_RUNTIME_URL || 'https://github.com/Wscthhh/basketball-video-stats/releases/download/v0.1.0/CourtTrace-Runtime-0.1.0.json'
   if (!url) {
     dialog.showErrorBox('COURTTRACE 需要运行环境', '首次启动需要下载独立 Runtime。请配置 COURTTRACE_RUNTIME_URL，或先安装 Runtime 包。')
     return false
