@@ -26,10 +26,12 @@ class ApiTest(unittest.TestCase):
         main.COVERS_DIR = main.DATA_DIR / "covers"
         main.CATEGORY_DATA_DIR = main.DATA_DIR / "training" / "review"
         main.CLIP_TEAM_DATA_DIR = main.DATA_DIR / "training" / "clip-team"
+        main.EXPORT_DIR = main.DATA_DIR / "exports"
         main.UPLOAD_DIR.mkdir(parents=True)
         main.COVERS_DIR.mkdir(parents=True)
         main.CATEGORY_DATA_DIR.mkdir(parents=True)
         main.CLIP_TEAM_DATA_DIR.mkdir(parents=True)
+        main.EXPORT_DIR.mkdir(parents=True)
         main.init_db()
         with main.db() as connection:
             connection.execute("INSERT INTO matches VALUES(?,?,?,?,?,?,?)", ("integration-test", "integration-test", None, None, "active", 1, main.now()))
@@ -66,6 +68,11 @@ class ApiTest(unittest.TestCase):
             c.execute("UPDATE matches SET created_at=? WHERE id=?", ("2026-01-02T00:00:00+00:00", newer))
         ordered = self.client.get("/api/matches?include_test=false").json()
         self.assertEqual([item["id"] for item in ordered], [newer, older])
+
+    def test_team_training_status_requires_balanced_samples(self) -> None:
+        match_id = self.client.post("/api/matches", json={"name": "Training", "homeTeam": {"name": "Home"}, "awayTeam": {"name": "Away"}}).json()["id"]
+        status = self.client.get(f"/api/matches/{match_id}/team-classifier/training-status")
+        self.assertEqual((status.status_code, status.json()["ready"], status.json()["suggestion"]), (200, False, False))
 
     def test_stats_merge_and_explicit_clear(self) -> None:
         match_id = self.client.post("/api/matches", json={"name": "Stats", "homeTeam": {"name": "A"}, "awayTeam": {"name": "B"}}).json()["id"]

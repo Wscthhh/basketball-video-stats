@@ -68,6 +68,7 @@ def init_db() -> None:
          CREATE TABLE IF NOT EXISTS review_samples (id TEXT PRIMARY KEY, match_id TEXT NOT NULL, clip_id TEXT NOT NULL, event_id TEXT NOT NULL UNIQUE, label TEXT NOT NULL, shot_type TEXT, player_id TEXT, seconds REAL NOT NULL, metadata_json TEXT NOT NULL DEFAULT '{}', created_at TEXT NOT NULL, FOREIGN KEY(match_id) REFERENCES matches(id), FOREIGN KEY(clip_id) REFERENCES clips(id), FOREIGN KEY(event_id) REFERENCES analysis_events(id));
          CREATE TABLE IF NOT EXISTS clip_review_samples (id TEXT PRIMARY KEY, match_id TEXT NOT NULL, clip_id TEXT NOT NULL UNIQUE, team_id TEXT NOT NULL, label TEXT NOT NULL, frames_json TEXT NOT NULL DEFAULT '[]', metadata_json TEXT NOT NULL DEFAULT '{}', created_at TEXT NOT NULL, updated_at TEXT NOT NULL, FOREIGN KEY(match_id) REFERENCES matches(id), FOREIGN KEY(clip_id) REFERENCES clips(id), FOREIGN KEY(team_id) REFERENCES teams(id));
          CREATE TABLE IF NOT EXISTS team_highlight_exports (id TEXT PRIMARY KEY, match_id TEXT NOT NULL, team_id TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'queued', progress REAL NOT NULL DEFAULT 0, clip_ids_json TEXT NOT NULL DEFAULT '[]', output_path TEXT, error TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL, updated_at TEXT NOT NULL, FOREIGN KEY(match_id) REFERENCES matches(id), FOREIGN KEY(team_id) REFERENCES teams(id));
+         CREATE TABLE IF NOT EXISTS team_classifier_profiles (team_id TEXT PRIMARY KEY, match_id TEXT NOT NULL, sample_count INTEGER NOT NULL DEFAULT 0, rgb_json TEXT NOT NULL, trained_at TEXT NOT NULL, FOREIGN KEY(team_id) REFERENCES teams(id));
           """)
         run_columns = {r["name"] for r in c.execute("PRAGMA table_info(analysis_runs)")}
         clip_columns = {r["name"] for r in c.execute("PRAGMA table_info(clips)")}
@@ -183,6 +184,56 @@ def clip_has_team_assignment(row: sqlite3.Row) -> bool:
     return row["team_id"] is not None and row["team_source"] in ("ai", "manual")
 
 
+def learned_team_prototypes(c: sqlite3.Connection, match_id: str) -> dict[str, tuple[float, float, float]]:
+    return {row["team_id"]: tuple(json.loads(row["rgb_json"])) for row in c.execute("SELECT team_id,rgb_json FROM team_classifier_profiles WHERE match_id=?", (match_id,))}
+
+
+TRAINING_SAMPLE_THRESHOLD = 10
+
+
+def team_training_status(c: sqlite3.Connection, match_id: str) -> dict[str, Any]:
+    teams = c.execute("SELECT id,side,name FROM teams WHERE match_id=? ORDER BY side", (match_id,)).fetchall()
+    counts = {row["team_id"]: row["count"] for row in c.execute("SELECT team_id,COUNT(*) AS count FROM clip_review_samples WHERE match_id=? GROUP BY team_id", (match_id,))}
+    profiles = {row["team_id"]: row for row in c.execute("SELECT team_id,sample_count,trained_at FROM team_classifier_profiles WHERE match_id=?", (match_id,))}
+    team_status = [{"teamId": team["id"], "side": team["side"], "name": team["name"], "sampleCount": counts.get(team["id"], 0), "trainedSampleCount": profiles[team["id"]]["sample_count"] if team["id"] in profiles else 0, "trainedAt": profiles[team["id"]]["trained_at"] if team["id"] in profiles else None} for team in teams]
+    ready = len(team_status) == 2 and all(item["sampleCount"] >= TRAINING_SAMPLE_THRESHOLD for item in team_status)
+    trained = len(team_status) == 2 and all(item["trainedSampleCount"] >= TRAINING_SAMPLE_THRESHOLD for item in team_status)
+    stale = trained and any(item["sampleCount"] > item["trainedSampleCount"] for item in team_status)
+    return {"threshold": TRAINING_SAMPLE_THRESHOLD, "ready": ready, "trained": trained, "suggestion": ready and (not trained or stale), "teams": team_status}
+
+
+def train_team_classifier(match_id: str) -> dict[str, Any]:
+    try:
+        import cv2
+    except ImportError as error:
+        raise RuntimeError("缺少 OpenCV，无法训练球队识别模型") from error
+    with db() as c:
+        require_match(match_id, c)
+        rows = c.execute("SELECT team_id,frames_json FROM clip_review_samples WHERE match_id=? ORDER BY created_at", (match_id,)).fetchall()
+        samples: dict[str, list[tuple[float, float, float]]] = {}
+        for row in rows:
+            for frame in json.loads(row["frames_json"] or "[]"):
+                path = DATA_DIR / frame
+                image = cv2.imread(str(path)) if not Path(frame).is_absolute() else cv2.imread(str(path))
+                if image is None:
+                    continue
+                height, width = image.shape[:2]
+                crop = image[int(height * .2):int(height * .8), int(width * .2):int(width * .8)]
+                if crop.size:
+                    blue, green, red = [float(value) for value in cv2.mean(crop)[:3]]
+                    samples.setdefault(row["team_id"], []).append((red, green, blue))
+        teams = c.execute("SELECT id FROM teams WHERE match_id=? ORDER BY side", (match_id,)).fetchall()
+        if len(teams) != 2 or any(len(samples.get(team["id"], [])) < TRAINING_SAMPLE_THRESHOLD for team in teams):
+            raise ValueError(f"每支球队至少需要 {TRAINING_SAMPLE_THRESHOLD} 个有效训练片段")
+        trained_at = now()
+        for team in teams:
+            values = samples[team["id"]]
+            prototype = tuple(sum(value[index] for value in values) / len(values) for index in range(3))
+            sample_count = c.execute("SELECT COUNT(*) FROM clip_review_samples WHERE team_id=?", (team["id"],)).fetchone()[0]
+            c.execute("INSERT INTO team_classifier_profiles(team_id,match_id,sample_count,rgb_json,trained_at) VALUES(?,?,?,?,?) ON CONFLICT(team_id) DO UPDATE SET sample_count=excluded.sample_count,rgb_json=excluded.rgb_json,trained_at=excluded.trained_at", (team["id"], match_id, sample_count, json.dumps(prototype), trained_at))
+        return team_training_status(c, match_id)
+
+
 def capture_clip_team_sample(clip: sqlite3.Row, sample_dir: Path) -> list[str]:
     frames: list[str] = []
     sample_dir.mkdir(parents=True, exist_ok=True)
@@ -287,6 +338,21 @@ async def startup() -> None:
 async def health() -> dict[str, Any]:
     has_cuda = cuda_available()
     return {"ok": True, "device": "cuda" if has_cuda else "cpu", "cuda": has_cuda, "torchInstalled": torch_installed(), "ffmpeg": command_available("ffmpeg"), "ffprobe": command_available("ffprobe"), "mode": "GPU 加速" if has_cuda else "CPU fallback", "analyzer": ANALYZER.status()}
+
+
+@app.get("/api/matches/{match_id}/team-classifier/training-status")
+async def get_team_training_status(match_id: str) -> dict[str, Any]:
+    with db() as c:
+        require_match(match_id, c)
+        return team_training_status(c, match_id)
+
+
+@app.post("/api/matches/{match_id}/team-classifier/train")
+async def train_team_classifier_endpoint(match_id: str) -> dict[str, Any]:
+    try:
+        return await asyncio.to_thread(train_team_classifier, match_id)
+    except (RuntimeError, ValueError) as error:
+        raise HTTPException(422, str(error)) from error
 
 
 @app.get("/api/matches")
@@ -975,7 +1041,7 @@ def cleanup_match_analysis(match_id: str) -> dict[str, int]:
         return {"events": len(removable), "protectedEvents": len(protected), "tracks": len(track_rows), "players": len(player_rows), "runs": runs}
 def infer_team_id(c: sqlite3.Connection, match_id: str, rgb: tuple[float, float, float] | None) -> str | None:
     teams = [dict(row) for row in c.execute("SELECT id,color FROM teams WHERE match_id=? AND color IS NOT NULL", (match_id,)).fetchall()]
-    return classify_team(rgb, teams).team_id
+    return classify_team(rgb, teams, learned_team_prototypes(c, match_id)).team_id
 
 
 async def run_analysis(run_id: str, match_id: str, clip_ids: list[str], device: str) -> None:
@@ -1041,7 +1107,7 @@ async def run_analysis(run_id: str, match_id: str, clip_ids: list[str], device: 
                 current_clip = c.execute("SELECT team_source FROM clips WHERE id=?", (clip_id,)).fetchone()
                 if not current_clip or current_clip["team_source"] != "manual":
                     teams = [dict(row) for row in c.execute("SELECT id,color FROM teams WHERE match_id=? ORDER BY side", (match_id,)).fetchall()]
-                    decision = classify_clip_team(inspection.tracks, teams)
+                    decision = classify_clip_team(inspection.tracks, teams, learned_team_prototypes(c, match_id))
                     if decision.team_id is None:
                         c.execute("UPDATE clips SET team_id=NULL,team_source='unresolved',team_confidence=0,team_evidence=? WHERE id=?", (decision.evidence, clip_id))
                     else:

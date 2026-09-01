@@ -1,4 +1,4 @@
-import type { Clip, ClipCollections, EventRecord, Health, Match, Run, TeamHighlightExport, Workspace } from './types'
+import type { Clip, ClipCollections, EventRecord, Health, Match, Run, TeamHighlightExport, TeamTrainingStatus, Workspace } from './types'
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await fetch(path, init)
@@ -25,4 +25,6 @@ export const api = {
   downloadClipUrl: (id: string) => `/api/clips/${encodeURIComponent(id)}/download`,
   teamHighlights: (id: string) => request<TeamHighlightExport[]>(`/api/matches/${encodeURIComponent(id)}/team-highlights`),
   generateTeamHighlight: (matchId: string, teamId: string) => request<TeamHighlightExport>(`/api/matches/${encodeURIComponent(matchId)}/team-highlights/${encodeURIComponent(teamId)}/generate`, { method: 'POST' }),
+  teamTrainingStatus: (id: string) => request<TeamTrainingStatus>(`/api/matches/${encodeURIComponent(id)}/team-classifier/training-status`),
+  trainTeamClassifier: (id: string) => request<TeamTrainingStatus>(`/api/matches/${encodeURIComponent(id)}/team-classifier/train`, { method: 'POST' }),
 }

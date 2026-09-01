@@ -40,9 +40,9 @@ def jersey_distance(sample: tuple[float, float, float] | None, target_hex: str |
     return hue_gap * (0.7 + 1.3 * hue_weight) + saturation_gap * 0.35 + value_gap * 0.8
 
 
-def classify(sample: tuple[float, float, float] | None, teams: list[dict[str, str | None]]) -> TeamMatch:
+def classify(sample: tuple[float, float, float] | None, teams: list[dict[str, str | None]], prototypes: dict[str, tuple[float, float, float]] | None = None) -> TeamMatch:
     candidates = sorted(
-        (jersey_distance(sample, team.get("color")), team.get("id"))
+        (jersey_distance(sample, "#%02x%02x%02x" % tuple(round(max(0, min(255, value))) for value in prototypes[team["id"]])) if prototypes and team.get("id") in prototypes else jersey_distance(sample, team.get("color")), team.get("id"))
         for team in teams
         if team.get("id") and team.get("color")
     )

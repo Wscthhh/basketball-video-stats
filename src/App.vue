@@ -11,7 +11,7 @@ import ImportClipsModal from './components/ImportClipsModal.vue'
 import MatchOverview from './components/MatchOverview.vue'
 import TeamHighlightExports from './components/TeamHighlightExports.vue'
 import WorkspaceHeader from './components/WorkspaceHeader.vue'
-import type { Clip, ClipCollections, CreateMatchDraft, Health, Match, Run, TabKey, TeamHighlightExport, Workspace } from './types'
+import type { Clip, ClipCollections, CreateMatchDraft, Health, Match, Run, TabKey, TeamHighlightExport, TeamTrainingStatus, Workspace } from './types'
 
 const tab = ref<TabKey>('overview')
 const matches = ref<Match[]>([])
@@ -19,6 +19,8 @@ const match = ref<Match | null>(null)
 const workspace = ref<Workspace | null>(null)
 const collections = ref<ClipCollections | null>(null)
 const teamHighlights = ref<TeamHighlightExport[]>([])
+const trainingStatus = ref<TeamTrainingStatus | null>(null)
+const trainingBusy = ref(false)
 const health = ref<Health | null>(null)
 const loadError = ref('')
 const actionError = ref('')
@@ -69,15 +71,17 @@ function fallbackCollections(result: Workspace): ClipCollections {
 async function loadWorkspace(matchId: string) {
   loadError.value = ''
   try {
-    const [result, collectionResponse, exportResponse] = await Promise.all([
+    const [result, collectionResponse, exportResponse, trainingResponse] = await Promise.all([
       api.workspace(matchId),
       api.clipCollections(matchId).catch(() => null),
       api.teamHighlights(matchId).catch(() => []),
+      api.teamTrainingStatus(matchId).catch(() => null),
     ])
     workspace.value = result
     match.value = result.match
     collections.value = collectionResponse ?? fallbackCollections(result)
     teamHighlights.value = exportResponse
+    trainingStatus.value = trainingResponse
     if (teamHighlights.value.some((item) => item.status === 'queued' || item.status === 'running')) startExportPolling()
     if (activeClipId.value && !result.clips.some((clip) => clip.id === activeClipId.value)) activeClipId.value = ''
     const activeRun = result.runs.find((run) => run.status === 'running')
@@ -86,6 +90,18 @@ async function loadWorkspace(matchId: string) {
     loadError.value = error instanceof Error ? error.message : '工作区加载失败'
     workspace.value = null
     collections.value = null
+  }
+}
+
+async function trainTeamClassifier() {
+  if (!match.value || trainingBusy.value) return
+  trainingBusy.value = true
+  try {
+    trainingStatus.value = await api.trainTeamClassifier(match.value.id)
+  } catch (error) {
+    fail(error)
+  } finally {
+    trainingBusy.value = false
   }
 }
 
@@ -324,7 +340,7 @@ onBeforeUnmount(() => { stopPolling(); stopExportPolling() })
         <div v-if="actionError" class="error-banner"><CircleAlert :size="17" />{{ actionError }}<button class="icon-button" type="button" title="关闭" @click="actionError = ''"><X :size="16" /></button></div>
         <template v-if="match && workspace">
            <WorkspaceHeader :match="match" :clip-count="clips.length" :home-clip-count="homeClips.length" :away-clip-count="awayClips.length" :unresolved-count="unresolvedClips.length" :busy="busy" :polling="Boolean(pollingRunId)" :analysis-run="analysisRun" @reanalyze="reanalyzeAll" @import-clips="showImport = true" />
-           <template v-if="tab === 'overview'"><TeamHighlightExports :home-team="homeTeam" :away-team="awayTeam" :exports="teamHighlights" :busy="busy" @generate="generateTeamHighlight" /><MatchOverview :home-team="homeTeam" :away-team="awayTeam" :home-clips="homeClips" :away-clips="awayClips" :unresolved-clips="unresolvedClips" @open-clip="openClip" @export-clip="exportClip" /></template>
+           <template v-if="tab === 'overview'"><div v-if="trainingStatus?.suggestion" class="training-suggestion"><span><strong>建议训练球队识别模型</strong><small>两队人工训练样本均已达到 {{ trainingStatus.threshold }} 个</small></span><button class="button button-quiet" type="button" :disabled="trainingBusy" @click="trainTeamClassifier">{{ trainingBusy ? '训练中' : '训练模型' }}</button></div><TeamHighlightExports :home-team="homeTeam" :away-team="awayTeam" :exports="teamHighlights" :busy="busy" @generate="generateTeamHighlight" /><MatchOverview :home-team="homeTeam" :away-team="awayTeam" :home-clips="homeClips" :away-clips="awayClips" :unresolved-clips="unresolvedClips" @open-clip="openClip" @export-clip="exportClip" /></template>
           <ClipReviewQueue v-else-if="tab === 'review'" :clips="unresolvedClips" @open-clip="openClip" />
            <ClipLibrary v-else :clips="clips" :busy="busy" :polling="Boolean(pollingRunId)" @open-clip="openClip" @export-clip="exportClip" @reanalyze="reanalyzeAll" @import-clips="showImport = true" />
         </template>
@@ -337,3 +353,7 @@ onBeforeUnmount(() => { stopPolling(); stopExportPolling() })
     <ClipPreviewModal v-if="activeClip" :clip="activeClip" :home-team="homeTeam" :away-team="awayTeam" :busy="busy" :review-clips="unresolvedClips" @close="closeClip" @confirm-team="confirmClipTeam" @save-team="reassignClipTeam" @start-reassign="startReassign" @cancel-reassign="cancelReassign" @delete-clip="deleteActiveClip" @export-clip="exportClip" @navigate="navigateReviewClip" />
   </div>
 </template>
+
+<style scoped>
+.training-suggestion{display:flex;align-items:center;justify-content:space-between;gap:16px;margin-bottom:18px;padding:12px 15px;background:#252b18;border:1px solid #657c34;border-radius:5px;color:#d9e8b0}.training-suggestion span{display:grid;gap:4px}.training-suggestion strong{font-size:12px}.training-suggestion small{color:#b4c58b;font-size:10px}@media(max-width:760px){.training-suggestion{align-items:stretch;flex-direction:column}.training-suggestion .button{width:100%}}
+</style>

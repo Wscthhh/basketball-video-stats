@@ -65,7 +65,7 @@ class ClipTeamDecision:
     evidence: str
 
 
-def classify_clip_team(tracks: list[TrackCandidate], teams: list[dict[str, str | None]]) -> ClipTeamDecision:
+def classify_clip_team(tracks: list[TrackCandidate], teams: list[dict[str, str | None]], prototypes: dict[str, tuple[float, float, float]] | None = None) -> ClipTeamDecision:
     """Choose a clip team from stable jersey tracks, independently of shot events."""
     if len(teams) != 2 or any(not parse_hex(team.get("color")) for team in teams):
         return ClipTeamDecision(None, 0, "无法从片段可靠判断球队")
@@ -73,7 +73,7 @@ def classify_clip_team(tracks: list[TrackCandidate], teams: list[dict[str, str |
     for track in tracks:
         if track.detections < 3 or track.jersey_rgb is None:
             continue
-        result = classify_team(track.jersey_rgb, teams)
+        result = classify_team(track.jersey_rgb, teams, prototypes)
         if result.team_id is not None and result.confidence >= 0.18:
             votes.setdefault(result.team_id, []).append(result)
     ranked = sorted(votes.items(), key=lambda item: (-len(item[1]), -sum(v.confidence for v in item[1])))
