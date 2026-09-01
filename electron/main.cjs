@@ -45,7 +45,7 @@ function startBackend() {
 }
 
 function runtimeReady() {
-  const root = path.join(app.getPath('userData'), 'runtime')
+  const root = path.join(app.getPath('localAppData'), 'COURTTRACE', 'runtime')
   return fs.existsSync(path.join(root, 'backend', 'CourtTraceBackend', 'CourtTraceBackend.exe')) && fs.existsSync(path.join(root, 'ffmpeg', 'ffmpeg.exe')) && fs.existsSync(path.join(root, 'models', 'player_detector.pt'))
 }
 
@@ -83,13 +83,14 @@ async function downloadRuntime(url, target) {
 }
 
 async function ensureRuntime() {
-  if (!app.isPackaged || runtimeReady()) { runtimeRoot = app.isPackaged ? path.join(app.getPath('userData'), 'runtime') : path.join(__dirname, '..'); return true }
+  const installedRuntime = path.join(app.getPath('localAppData'), 'COURTTRACE', 'runtime')
+  if (!app.isPackaged || runtimeReady()) { runtimeRoot = app.isPackaged ? installedRuntime : path.join(__dirname, '..'); return true }
   const url = process.env.COURTTRACE_RUNTIME_URL || 'https://github.com/Wscthhh/basketball-video-stats/releases/download/v0.1.0/CourtTrace-Runtime-0.1.0.json'
   if (!url) {
     dialog.showErrorBox('COURTTRACE 需要运行环境', '首次启动需要下载独立 Runtime。请配置 COURTTRACE_RUNTIME_URL，或先安装 Runtime 包。')
     return false
   }
-  try { await downloadRuntime(url, path.join(app.getPath('userData'), 'runtime')); runtimeRoot = path.join(app.getPath('userData'), 'runtime'); return true } catch (error) { dialog.showErrorBox('Runtime 下载失败', error.message); return false }
+  try { await downloadRuntime(url, installedRuntime); runtimeRoot = installedRuntime; return true } catch (error) { dialog.showErrorBox('Runtime 下载失败', error.message); return false }
 }
 
 async function createWindow() {
