@@ -58,6 +58,15 @@ class ApiTest(unittest.TestCase):
         self.assertEqual(workspace["match"]["homeTeam"]["name"], "Red")
         self.assertIsInstance(workspace["stats"], list)
 
+    def test_matches_are_ordered_by_creation_time(self) -> None:
+        older = self.client.post("/api/matches", json={"name": "Older", "homeTeam": {"name": "Home"}, "awayTeam": {"name": "Away"}}).json()["id"]
+        newer = self.client.post("/api/matches", json={"name": "Newer", "playedAt": "2020-01-01", "homeTeam": {"name": "Home"}, "awayTeam": {"name": "Away"}}).json()["id"]
+        with main.db() as c:
+            c.execute("UPDATE matches SET created_at=? WHERE id=?", ("2026-01-01T00:00:00+00:00", older))
+            c.execute("UPDATE matches SET created_at=? WHERE id=?", ("2026-01-02T00:00:00+00:00", newer))
+        ordered = self.client.get("/api/matches?include_test=false").json()
+        self.assertEqual([item["id"] for item in ordered], [newer, older])
+
     def test_stats_merge_and_explicit_clear(self) -> None:
         match_id = self.client.post("/api/matches", json={"name": "Stats", "homeTeam": {"name": "A"}, "awayTeam": {"name": "B"}}).json()["id"]
         with main.db() as c:

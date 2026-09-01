@@ -289,8 +289,8 @@ async def health() -> dict[str, Any]:
 async def list_matches(include_test: bool = True) -> list[dict[str, Any]]:
     with db() as c:
         rows = c.execute(
-            "SELECT * FROM matches ORDER BY played_at DESC, created_at DESC" if include_test
-            else "SELECT * FROM matches WHERE is_test=0 ORDER BY played_at DESC, created_at DESC"
+            "SELECT * FROM matches ORDER BY created_at DESC" if include_test
+            else "SELECT * FROM matches WHERE is_test=0 ORDER BY created_at DESC"
         ).fetchall()
     with db() as c: return [match_payload(c, r) for r in rows]
 
