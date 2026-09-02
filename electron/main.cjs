@@ -12,6 +12,7 @@ let backend
 let backendPort = 8000
 let runtimeRoot
 let mainWindow
+let manualUpdateCheck = false
 const lanToken = crypto.randomBytes(24).toString('hex')
 
 function lanAddress() {
@@ -117,7 +118,7 @@ async function ensureRuntime() {
 
 async function createWindow() {
   const mobileUrl = `http://${lanAddress()}:${backendPort}/mobile?token=${lanToken}`
-  const window = new BrowserWindow({ width: 1440, height: 920, minWidth: 1000, minHeight: 700, webPreferences: { preload: path.join(__dirname, 'preload.cjs'), contextIsolation: true, sandbox: true, additionalArguments: [`--courttrace-api=http://127.0.0.1:${backendPort}`, `--courttrace-mobile=${mobileUrl}`] } })
+  const window = new BrowserWindow({ width: 1440, height: 920, minWidth: 1000, minHeight: 700, webPreferences: { preload: path.join(__dirname, 'preload.cjs'), contextIsolation: true, sandbox: true, additionalArguments: [`--courttrace-api=http://127.0.0.1:${backendPort}`, `--courttrace-mobile=${mobileUrl}`, `--courttrace-version=${app.getVersion()}`] } })
   mainWindow = window
   window.show()
   log('Desktop window created')
@@ -140,14 +141,22 @@ function sendUpdateStatus(status, payload = {}) {
 
 autoUpdater.autoDownload = false
 autoUpdater.on('checking-for-update', () => sendUpdateStatus('checking'))
-autoUpdater.on('update-available', (info) => sendUpdateStatus('available', { version: info.version }))
-autoUpdater.on('update-not-available', () => sendUpdateStatus('latest'))
+autoUpdater.on('update-available', async (info) => {
+  sendUpdateStatus('available', { version: info.version })
+  if (manualUpdateCheck) {
+    const result = await dialog.showMessageBox(mainWindow, { type: 'info', title: '发现新版本', message: `最新版本为 v${info.version}，当前版本为 v${app.getVersion()}。`, detail: '是否立即下载更新？', buttons: ['下载更新', '暂不更新'], defaultId: 0, cancelId: 1 })
+    if (result.response === 0) await autoUpdater.downloadUpdate()
+    manualUpdateCheck = false
+  }
+})
+autoUpdater.on('update-not-available', () => sendUpdateStatus('latest', { version: app.getVersion() }))
 autoUpdater.on('download-progress', (info) => sendUpdateStatus('downloading', { percent: info.percent }))
 autoUpdater.on('update-downloaded', (info) => sendUpdateStatus('downloaded', { version: info.version }))
-autoUpdater.on('error', (error) => sendUpdateStatus('error', { message: error.message }))
+autoUpdater.on('error', (error) => sendUpdateStatus('error', { message: error.message.includes('404') || error.message.includes('releases.atom') ? 'GitHub Release 更新源不可访问（HTTP 404），请确认仓库和 Release 对客户端公开。' : error.message }))
 ipcMain.handle('check-for-updates', async () => {
   if (!app.isPackaged) return { status: 'development' }
-  await autoUpdater.checkForUpdates()
+  manualUpdateCheck = true
+  try { await autoUpdater.checkForUpdates() } catch (error) { sendUpdateStatus('error', { message: error.message }); throw error }
   return { status: 'checking' }
 })
 ipcMain.handle('download-update', async () => { await autoUpdater.downloadUpdate(); return { status: 'downloading' } })

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { Activity, ChevronRight, CircleAlert, RefreshCw, X } from 'lucide-vue-next'
 import { api } from './api'
 import AppSidebar from './components/AppSidebar.vue'
@@ -12,6 +12,7 @@ import MatchOverview from './components/MatchOverview.vue'
 import TeamHighlightExports from './components/TeamHighlightExports.vue'
 import WorkspaceHeader from './components/WorkspaceHeader.vue'
 import type { Clip, ClipCollections, CreateMatchDraft, Health, Match, Run, TabKey, TeamHighlightExport, TeamTrainingStatus, Workspace } from './types'
+import QRCode from 'qrcode'
 
 const tab = ref<TabKey>('overview')
 const matches = ref<Match[]>([])
@@ -51,10 +52,12 @@ const activeClip = computed(() => clips.value.find((clip) => clip.id === activeC
 const homeTeam = computed(() => workspace.value?.teams.find((team) => team.side === 'home') ?? match.value?.homeTeam)
 const awayTeam = computed(() => workspace.value?.teams.find((team) => team.side === 'away') ?? match.value?.awayTeam)
 const mobileUploadUrl = computed(() => (window as Window & { courtTraceDesktop?: { mobileUrl?: string } }).courtTraceDesktop?.mobileUrl || '')
-const desktopBridge = computed(() => (window as Window & { courtTraceDesktop?: { checkForUpdates?: () => Promise<unknown>; downloadUpdate?: () => Promise<unknown>; installUpdate?: () => Promise<unknown>; onUpdateStatus?: (callback: (payload: { status: string; version?: string; percent?: number; message?: string }) => void) => void } }).courtTraceDesktop)
+const desktopBridge = computed(() => (window as Window & { courtTraceDesktop?: { version?: string; checkForUpdates?: () => Promise<unknown>; downloadUpdate?: () => Promise<unknown>; installUpdate?: () => Promise<unknown>; onUpdateStatus?: (callback: (payload: { status: string; version?: string; percent?: number; message?: string }) => void) => void } }).courtTraceDesktop)
 const updateStatus = ref('')
 const updateVersion = ref('')
 const updateProgress = ref(0)
+const mobileQr = ref('')
+const showMobileQr = ref(false)
 const hasTeamAssignment = (clip: Clip) => Boolean(clip.teamId) && ['ai', 'manual'].includes(clip.teamSource ?? '')
 const unresolvedClips = computed(() => collections.value?.unresolved ?? clips.value.filter((clip) => !hasTeamAssignment(clip)))
 const homeClips = computed(() => collections.value?.home.clips ?? clips.value.filter((clip) => hasTeamAssignment(clip) && clip.teamId === homeTeam.value?.id))
@@ -95,6 +98,10 @@ function handleUpdateStatus(payload: { status: string; version?: string; percent
 function checkUpdates() { void desktopBridge.value?.checkForUpdates?.() }
 function downloadUpdate() { void desktopBridge.value?.downloadUpdate?.() }
 function installUpdate() { void desktopBridge.value?.installUpdate?.() }
+
+async function refreshMobileQr(url: string) {
+  mobileQr.value = url ? await QRCode.toDataURL(url, { width: 240, margin: 2, color: { dark: '#101614', light: '#f4f5f0' } }) : ''
+}
 
 function fallbackCollections(result: Workspace): ClipCollections {
   const homeId = result.match.homeTeam.id ?? result.teams.find((team) => team.side === 'home')?.id
@@ -423,6 +430,7 @@ async function deleteActiveClip() {
 }
 
 onMounted(() => { desktopBridge.value?.onUpdateStatus?.(handleUpdateStatus); void boot() })
+watch(mobileUploadUrl, (url) => { void refreshMobileQr(url) }, { immediate: true })
 onBeforeUnmount(() => { stopPolling(); stopExportPolling(); stopEventStream() })
 </script>
 
@@ -435,7 +443,7 @@ onBeforeUnmount(() => { stopPolling(); stopExportPolling(); stopEventStream() })
         <div v-if="loadError" class="error-banner"><CircleAlert :size="17" />{{ loadError }}<button class="icon-button" type="button" title="重试" @click="boot"><RefreshCw :size="16" /></button></div>
         <div v-if="actionError" class="error-banner"><CircleAlert :size="17" />{{ actionError }}<button class="icon-button" type="button" title="关闭" @click="actionError = ''"><X :size="16" /></button></div>
         <template v-if="match && workspace">
-           <WorkspaceHeader :match="match" :clip-count="clips.length" :home-clip-count="homeClips.length" :away-clip-count="awayClips.length" :unresolved-count="unresolvedClips.length" :busy="busy" :polling="Boolean(pollingRunId)" :analysis-run="analysisRun" :mobile-url="mobileUploadUrl" :desktop-mode="Boolean(desktopBridge)" :update-status="updateStatus" :update-version="updateVersion" :update-progress="updateProgress" @reanalyze="reanalyzeAll" @import-clips="showImport = true" @check-updates="checkUpdates" @download-update="downloadUpdate" @install-update="installUpdate" />
+           <WorkspaceHeader :match="match" :clip-count="clips.length" :home-clip-count="homeClips.length" :away-clip-count="awayClips.length" :unresolved-count="unresolvedClips.length" :busy="busy" :polling="Boolean(pollingRunId)" :analysis-run="analysisRun" :mobile-url="mobileUploadUrl" :mobile-qr="mobileQr" :current-version="desktopBridge?.version" :desktop-mode="Boolean(desktopBridge)" :update-status="updateStatus" :update-version="updateVersion" :update-progress="updateProgress" @reanalyze="reanalyzeAll" @import-clips="showImport = true" @check-updates="checkUpdates" @download-update="downloadUpdate" @install-update="installUpdate" @show-mobile-qr="showMobileQr = true" />
            <template v-if="tab === 'overview'"><div v-if="trainingStatus?.suggestion" class="training-suggestion"><span><strong>建议训练球队识别模型</strong><small>两队人工训练样本均已达到 {{ trainingStatus.threshold }} 个</small></span><button class="button button-quiet" type="button" :disabled="trainingBusy" @click="trainTeamClassifier">{{ trainingBusy ? '训练中' : '训练模型' }}</button></div><TeamHighlightExports :home-team="homeTeam" :away-team="awayTeam" :exports="teamHighlights" :busy="busy" @generate="generateTeamHighlight" /><MatchOverview :home-team="homeTeam" :away-team="awayTeam" :home-clips="homeClips" :away-clips="awayClips" :unresolved-clips="unresolvedClips" @open-clip="openClip" @export-clip="exportClip" /></template>
           <ClipReviewQueue v-else-if="tab === 'review'" :clips="unresolvedClips" @open-clip="openClip" />
            <ClipLibrary v-else :clips="clips" :busy="busy" :polling="Boolean(pollingRunId)" @open-clip="openClip" @export-clip="exportClip" @reanalyze="reanalyzeAll" @import-clips="showImport = true" />
@@ -445,6 +453,7 @@ onBeforeUnmount(() => { stopPolling(); stopExportPolling(); stopEventStream() })
     </main>
 
     <CreateMatchModal v-if="showCreate" v-model:draft="createDraft" :busy="busy" @close="showCreate = false" @submit="createMatch" />
+    <div v-if="showMobileQr" class="modal-layer" @click.self="showMobileQr = false"><section class="modal mobile-qr-modal"><div class="modal-header"><div><span class="panel-kicker">MOBILE UPLOAD</span><h2>手机扫码上传</h2><p>请确保手机和电脑连接同一个 Wi-Fi。</p></div><button class="icon-button dark" type="button" title="关闭" @click="showMobileQr = false"><X :size="18" /></button></div><img :src="mobileQr" alt="手机上传地址二维码" /><code>{{ mobileUploadUrl }}</code></section></div>
     <ImportClipsModal v-if="showImport" :files="pendingFiles" :busy="busy" @close="showImport = false" @select-files="pendingFiles = $event" @upload="upload" />
     <ClipPreviewModal v-if="activeClip" :clip="activeClip" :home-team="homeTeam" :away-team="awayTeam" :busy="busy" :navigation-clips="activeClipQueue" @close="closeClip" @confirm-team="confirmClipTeam" @save-team="reassignClipTeam" @start-reassign="startReassign" @cancel-reassign="cancelReassign" @delete-clip="deleteActiveClip" @export-clip="exportClip" @navigate="navigateReviewClip" />
   </div>
@@ -452,4 +461,5 @@ onBeforeUnmount(() => { stopPolling(); stopExportPolling(); stopEventStream() })
 
 <style scoped>
 .training-suggestion{display:flex;align-items:center;justify-content:space-between;gap:16px;margin-bottom:18px;padding:12px 15px;background:#252b18;border:1px solid #657c34;border-radius:5px;color:#d9e8b0}.training-suggestion span{display:grid;gap:4px}.training-suggestion strong{font-size:12px}.training-suggestion small{color:#b4c58b;font-size:10px}@media(max-width:760px){.training-suggestion{align-items:stretch;flex-direction:column}.training-suggestion .button{width:100%}}
+.mobile-qr-modal{display:grid;justify-items:center;gap:14px;text-align:center}.mobile-qr-modal .modal-header{width:100%;text-align:left}.mobile-qr-modal img{width:240px;height:240px;padding:10px;background:#f4f5f0;border-radius:6px}.mobile-qr-modal code{max-width:100%;overflow-wrap:anywhere;color:#9eae9f;font-size:10px}
 </style>

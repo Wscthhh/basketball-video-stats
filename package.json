@@ -1,7 +1,7 @@
 {
   "name": "courttrace",
   "private": true,
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "COURTTRACE local basketball video analysis desktop app",
   "author": "COURTTRACE",
   "type": "module",
@@ -20,9 +20,11 @@
   "dependencies": {
     "electron-updater": "^6.6.2",
     "lucide-vue-next": "^0.468.0",
+    "qrcode": "^1.5.4",
     "vue": "^3.5.13"
   },
   "devDependencies": {
+    "@types/qrcode": "^1.5.6",
     "@vitejs/plugin-vue": "^5.2.1",
     "electron": "^36.4.0",
     "electron-builder": "^26.0.12",
@@ -44,7 +46,10 @@
       "package.json"
     ],
     "extraResources": [
-      { "from": "node_modules/7zip-bin/win/x64/7za.exe", "to": "tools/7za.exe" }
+      {
+        "from": "node_modules/7zip-bin/win/x64/7za.exe",
+        "to": "tools/7za.exe"
+      }
     ],
     "win": {
       "target": "nsis",
@@ -57,6 +62,12 @@
       "createDesktopShortcut": true,
       "createStartMenuShortcut": true
     },
-    "publish": [{ "provider": "github", "owner": "Wscthhh", "repo": "basketball-video-stats" }]
+    "publish": [
+      {
+        "provider": "github",
+        "owner": "Wscthhh",
+        "repo": "basketball-video-stats"
+      }
+    ]
   }
 }

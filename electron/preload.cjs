@@ -2,8 +2,9 @@ const { contextBridge, ipcRenderer } = require('electron')
 
 const apiArgument = process.argv.find((value) => value.startsWith('--courttrace-api='))
 const mobileArgument = process.argv.find((value) => value.startsWith('--courttrace-mobile='))
+const versionArgument = process.argv.find((value) => value.startsWith('--courttrace-version='))
 contextBridge.exposeInMainWorld('courtTraceDesktop', {
-  version: '0.1.1',
+  version: versionArgument?.slice('--courttrace-version='.length) || '0.1.2',
   apiBase: apiArgument?.slice('--courttrace-api='.length) || '',
   mobileUrl: mobileArgument?.slice('--courttrace-mobile='.length) || '',
   checkForUpdates: () => ipcRenderer.invoke('check-for-updates'),

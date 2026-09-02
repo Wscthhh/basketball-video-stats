@@ -17,13 +17,15 @@ defineProps<{
   updateStatus?: string
   updateVersion?: string
   updateProgress?: number
+  currentVersion?: string
+  mobileQr?: string
 }>()
 
 function copyMobileUrl(url?: string) {
   if (url) void navigator.clipboard?.writeText(url)
 }
 
-const emit = defineEmits<{ reanalyze: []; importClips: []; checkUpdates: []; downloadUpdate: []; installUpdate: [] }>()
+const emit = defineEmits<{ reanalyze: []; importClips: []; checkUpdates: []; downloadUpdate: []; installUpdate: []; showMobileQr: [] }>()
 </script>
 
 <template>
@@ -38,7 +40,7 @@ const emit = defineEmits<{ reanalyze: []; importClips: []; checkUpdates: []; dow
         <RefreshCw :size="16" /> {{ polling ? '重新分析中' : '重新分析全部' }}
       </button>
       <button class="button button-acid" type="button" @click="$emit('importClips')"><CloudUpload :size="17" /> 导入片段</button>
-      <button v-if="desktopMode" class="button button-quiet update-button" type="button" :disabled="updateStatus === 'checking' || updateStatus === 'downloading'" @click="updateStatus === 'available' ? emit('downloadUpdate') : updateStatus === 'downloaded' ? emit('installUpdate') : emit('checkUpdates')"><RefreshCw :size="15" />{{ updateStatus === 'checking' ? '检查中' : updateStatus === 'available' ? `下载 v${updateVersion}` : updateStatus === 'downloading' ? `下载中 ${Math.round(updateProgress || 0)}%` : updateStatus === 'downloaded' ? '重启安装更新' : updateStatus === 'latest' ? '已是最新' : '检查更新' }}</button>
+      <button v-if="desktopMode" class="button button-quiet update-button" type="button" :disabled="updateStatus === 'checking' || updateStatus === 'downloading'" @click="updateStatus === 'available' ? emit('downloadUpdate') : updateStatus === 'downloaded' ? emit('installUpdate') : emit('checkUpdates')"><RefreshCw :size="15" />{{ updateStatus === 'checking' ? '检查中' : updateStatus === 'available' ? `最新 v${updateVersion}` : updateStatus === 'downloading' ? `下载中 ${Math.round(updateProgress || 0)}%` : updateStatus === 'downloaded' ? '重启安装更新' : updateStatus === 'latest' ? '已是最新' : '检查更新' }}</button>
     </div>
   </section>
   <section v-if="polling && analysisRun" class="analysis-progress" aria-live="polite">
@@ -46,7 +48,8 @@ const emit = defineEmits<{ reanalyze: []; importClips: []; checkUpdates: []; dow
     <div class="analysis-progress-track"><span :style="{ width: `${Math.max(0, Math.min(100, analysisRun.progress || 0))}%` }"></span></div>
   </section>
   <section v-else-if="analysisRun?.status === 'failed'" class="analysis-progress analysis-progress-error" role="alert"><strong>分析失败</strong><span>{{ analysisRun.error || '请检查片段后重试。' }}</span></section>
-  <section v-if="mobileUrl" class="mobile-upload-link"><div><strong>手机上传</strong><span>手机连接同一 Wi-Fi 后访问此地址上传视频</span></div><code>{{ mobileUrl }}</code><button class="button button-quiet" type="button" @click="copyMobileUrl(mobileUrl)">复制地址</button></section>
+  <section v-if="mobileUrl" class="mobile-upload-link"><div><strong>手机上传</strong><span>手机连接同一 Wi-Fi 后访问此地址上传视频</span></div><code>{{ mobileUrl }}</code><button v-if="mobileQr" class="button button-quiet" type="button" @click="emit('showMobileQr')">二维码</button><button class="button button-quiet" type="button" @click="copyMobileUrl(mobileUrl)">复制地址</button></section>
+  <div class="workspace-version">当前版本 v{{ currentVersion || '未知' }}</div>
   <section class="metric-strip">
     <div class="metric-cell metric-primary"><div class="metric-label">全部片段</div><div class="metric-value">{{ clipCount }}</div><div class="metric-subline">当前比赛导入素材</div></div>
     <div class="metric-cell"><div class="metric-label">主队片段</div><div class="metric-value">{{ homeClipCount }}</div><div class="metric-subline">按球队归属</div></div>
