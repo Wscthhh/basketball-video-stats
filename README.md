@@ -23,6 +23,10 @@ npm run dev
 
 桌面版启动后，电脑总览顶部会显示一个手机上传地址。手机和电脑连接同一个 Wi-Fi 后，用手机浏览器打开该地址即可选择比赛并批量上传视频；上传完成后电脑会自动创建增量分析任务。手机上传链接带有随机令牌，仅在当前桌面应用运行期间有效。
 
+## 版本发布
+
+版本号和自动更新约定见 [`docs/VERSIONING.md`](docs/VERSIONING.md)。普通应用发布使用 `npm version patch`、`npm version minor` 或 `npm version major`，再推送 tag；GitHub Actions 会自动生成 Windows 应用安装包和更新元数据。
+
 ## 换电脑使用
 
 新电脑需要先安装以下环境：
