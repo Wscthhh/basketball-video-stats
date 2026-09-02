@@ -51,6 +51,10 @@ const activeClip = computed(() => clips.value.find((clip) => clip.id === activeC
 const homeTeam = computed(() => workspace.value?.teams.find((team) => team.side === 'home') ?? match.value?.homeTeam)
 const awayTeam = computed(() => workspace.value?.teams.find((team) => team.side === 'away') ?? match.value?.awayTeam)
 const mobileUploadUrl = computed(() => (window as Window & { courtTraceDesktop?: { mobileUrl?: string } }).courtTraceDesktop?.mobileUrl || '')
+const desktopBridge = computed(() => (window as Window & { courtTraceDesktop?: { checkForUpdates?: () => Promise<unknown>; downloadUpdate?: () => Promise<unknown>; installUpdate?: () => Promise<unknown>; onUpdateStatus?: (callback: (payload: { status: string; version?: string; percent?: number; message?: string }) => void) => void } }).courtTraceDesktop)
+const updateStatus = ref('')
+const updateVersion = ref('')
+const updateProgress = ref(0)
 const hasTeamAssignment = (clip: Clip) => Boolean(clip.teamId) && ['ai', 'manual'].includes(clip.teamSource ?? '')
 const unresolvedClips = computed(() => collections.value?.unresolved ?? clips.value.filter((clip) => !hasTeamAssignment(clip)))
 const homeClips = computed(() => collections.value?.home.clips ?? clips.value.filter((clip) => hasTeamAssignment(clip) && clip.teamId === homeTeam.value?.id))
@@ -80,6 +84,17 @@ const activeClipQueue = computed(() => {
 function fail(error: unknown) {
   actionError.value = error instanceof Error ? error.message : '请求失败'
 }
+
+function handleUpdateStatus(payload: { status: string; version?: string; percent?: number; message?: string }) {
+  updateStatus.value = payload.status
+  updateVersion.value = payload.version || updateVersion.value
+  updateProgress.value = payload.percent || 0
+  if (payload.status === 'error') actionError.value = payload.message || '检查更新失败'
+}
+
+function checkUpdates() { void desktopBridge.value?.checkForUpdates?.() }
+function downloadUpdate() { void desktopBridge.value?.downloadUpdate?.() }
+function installUpdate() { void desktopBridge.value?.installUpdate?.() }
 
 function fallbackCollections(result: Workspace): ClipCollections {
   const homeId = result.match.homeTeam.id ?? result.teams.find((team) => team.side === 'home')?.id
@@ -407,7 +422,7 @@ async function deleteActiveClip() {
   }
 }
 
-onMounted(boot)
+onMounted(() => { desktopBridge.value?.onUpdateStatus?.(handleUpdateStatus); void boot() })
 onBeforeUnmount(() => { stopPolling(); stopExportPolling(); stopEventStream() })
 </script>
 
@@ -420,7 +435,7 @@ onBeforeUnmount(() => { stopPolling(); stopExportPolling(); stopEventStream() })
         <div v-if="loadError" class="error-banner"><CircleAlert :size="17" />{{ loadError }}<button class="icon-button" type="button" title="重试" @click="boot"><RefreshCw :size="16" /></button></div>
         <div v-if="actionError" class="error-banner"><CircleAlert :size="17" />{{ actionError }}<button class="icon-button" type="button" title="关闭" @click="actionError = ''"><X :size="16" /></button></div>
         <template v-if="match && workspace">
-           <WorkspaceHeader :match="match" :clip-count="clips.length" :home-clip-count="homeClips.length" :away-clip-count="awayClips.length" :unresolved-count="unresolvedClips.length" :busy="busy" :polling="Boolean(pollingRunId)" :analysis-run="analysisRun" :mobile-url="mobileUploadUrl" @reanalyze="reanalyzeAll" @import-clips="showImport = true" />
+           <WorkspaceHeader :match="match" :clip-count="clips.length" :home-clip-count="homeClips.length" :away-clip-count="awayClips.length" :unresolved-count="unresolvedClips.length" :busy="busy" :polling="Boolean(pollingRunId)" :analysis-run="analysisRun" :mobile-url="mobileUploadUrl" :desktop-mode="Boolean(desktopBridge)" :update-status="updateStatus" :update-version="updateVersion" :update-progress="updateProgress" @reanalyze="reanalyzeAll" @import-clips="showImport = true" @check-updates="checkUpdates" @download-update="downloadUpdate" @install-update="installUpdate" />
            <template v-if="tab === 'overview'"><div v-if="trainingStatus?.suggestion" class="training-suggestion"><span><strong>建议训练球队识别模型</strong><small>两队人工训练样本均已达到 {{ trainingStatus.threshold }} 个</small></span><button class="button button-quiet" type="button" :disabled="trainingBusy" @click="trainTeamClassifier">{{ trainingBusy ? '训练中' : '训练模型' }}</button></div><TeamHighlightExports :home-team="homeTeam" :away-team="awayTeam" :exports="teamHighlights" :busy="busy" @generate="generateTeamHighlight" /><MatchOverview :home-team="homeTeam" :away-team="awayTeam" :home-clips="homeClips" :away-clips="awayClips" :unresolved-clips="unresolvedClips" @open-clip="openClip" @export-clip="exportClip" /></template>
           <ClipReviewQueue v-else-if="tab === 'review'" :clips="unresolvedClips" @open-clip="openClip" />
            <ClipLibrary v-else :clips="clips" :busy="busy" :polling="Boolean(pollingRunId)" @open-clip="openClip" @export-clip="exportClip" @reanalyze="reanalyzeAll" @import-clips="showImport = true" />

@@ -1,4 +1,4 @@
-const { app, BrowserWindow, dialog, net } = require('electron')
+const { app, BrowserWindow, dialog, net, ipcMain } = require('electron')
 const { spawn } = require('child_process')
 const path = require('path')
 const http = require('http')
@@ -11,6 +11,7 @@ const os = require('os')
 let backend
 let backendPort = 8000
 let runtimeRoot
+let mainWindow
 const lanToken = crypto.randomBytes(24).toString('hex')
 
 function lanAddress() {
@@ -117,6 +118,7 @@ async function ensureRuntime() {
 async function createWindow() {
   const mobileUrl = `http://${lanAddress()}:${backendPort}/mobile?token=${lanToken}`
   const window = new BrowserWindow({ width: 1440, height: 920, minWidth: 1000, minHeight: 700, webPreferences: { preload: path.join(__dirname, 'preload.cjs'), contextIsolation: true, sandbox: true, additionalArguments: [`--courttrace-api=http://127.0.0.1:${backendPort}`, `--courttrace-mobile=${mobileUrl}`] } })
+  mainWindow = window
   window.show()
   log('Desktop window created')
   if (!await ensureRuntime()) { window.destroy(); app.quit(); return }
@@ -132,8 +134,27 @@ async function createWindow() {
   }
 }
 
+function sendUpdateStatus(status, payload = {}) {
+  mainWindow?.webContents.send('update-status', { status, ...payload })
+}
+
+autoUpdater.autoDownload = false
+autoUpdater.on('checking-for-update', () => sendUpdateStatus('checking'))
+autoUpdater.on('update-available', (info) => sendUpdateStatus('available', { version: info.version }))
+autoUpdater.on('update-not-available', () => sendUpdateStatus('latest'))
+autoUpdater.on('download-progress', (info) => sendUpdateStatus('downloading', { percent: info.percent }))
+autoUpdater.on('update-downloaded', (info) => sendUpdateStatus('downloaded', { version: info.version }))
+autoUpdater.on('error', (error) => sendUpdateStatus('error', { message: error.message }))
+ipcMain.handle('check-for-updates', async () => {
+  if (!app.isPackaged) return { status: 'development' }
+  await autoUpdater.checkForUpdates()
+  return { status: 'checking' }
+})
+ipcMain.handle('download-update', async () => { await autoUpdater.downloadUpdate(); return { status: 'downloading' } })
+ipcMain.handle('install-update', () => { autoUpdater.quitAndInstall(); return { status: 'installing' } })
+
 app.whenReady().then(createWindow)
-app.whenReady().then(() => { if (app.isPackaged) { autoUpdater.checkForUpdatesAndNotify().catch(() => undefined) } })
+app.whenReady().then(() => { if (app.isPackaged) { autoUpdater.checkForUpdates().catch(() => undefined) } })
 app.on('window-all-closed', () => { if (backend) backend.kill(); if (process.platform !== 'darwin') app.quit() })
 app.on('before-quit', () => { if (backend) backend.kill() })
 process.on('uncaughtException', (error) => { log(`Uncaught exception: ${error.stack || error.message}`); dialog.showErrorBox('COURTTRACE 启动错误', error.message) })

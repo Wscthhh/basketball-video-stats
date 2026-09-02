@@ -13,13 +13,17 @@ defineProps<{
   polling: boolean
   analysisRun?: { progress?: number; completed?: number; total?: number; status?: string; error?: string }
   mobileUrl?: string
+  desktopMode?: boolean
+  updateStatus?: string
+  updateVersion?: string
+  updateProgress?: number
 }>()
-
-defineEmits<{ reanalyze: []; importClips: [] }>()
 
 function copyMobileUrl(url?: string) {
   if (url) void navigator.clipboard?.writeText(url)
 }
+
+const emit = defineEmits<{ reanalyze: []; importClips: []; checkUpdates: []; downloadUpdate: []; installUpdate: [] }>()
 </script>
 
 <template>
@@ -34,6 +38,7 @@ function copyMobileUrl(url?: string) {
         <RefreshCw :size="16" /> {{ polling ? '重新分析中' : '重新分析全部' }}
       </button>
       <button class="button button-acid" type="button" @click="$emit('importClips')"><CloudUpload :size="17" /> 导入片段</button>
+      <button v-if="desktopMode" class="button button-quiet update-button" type="button" :disabled="updateStatus === 'checking' || updateStatus === 'downloading'" @click="updateStatus === 'available' ? emit('downloadUpdate') : updateStatus === 'downloaded' ? emit('installUpdate') : emit('checkUpdates')"><RefreshCw :size="15" />{{ updateStatus === 'checking' ? '检查中' : updateStatus === 'available' ? `下载 v${updateVersion}` : updateStatus === 'downloading' ? `下载中 ${Math.round(updateProgress || 0)}%` : updateStatus === 'downloaded' ? '重启安装更新' : updateStatus === 'latest' ? '已是最新' : '检查更新' }}</button>
     </div>
   </section>
   <section v-if="polling && analysisRun" class="analysis-progress" aria-live="polite">
