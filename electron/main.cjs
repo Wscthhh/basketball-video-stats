@@ -13,6 +13,7 @@ let backendPort = 8000
 let runtimeRoot
 let mainWindow
 let manualUpdateCheck = false
+let startupRunning = false
 const lanToken = crypto.randomBytes(24).toString('hex')
 const requiredRuntimeVersion = '0.1.1'
 
@@ -89,14 +90,49 @@ function runtimeReady() {
   return ready
 }
 
-function downloadFile(url, destination) {
+function sendRuntimeStatus(payload) {
+  mainWindow?.webContents.send('runtime-status', payload)
+}
+
+function hashFile(filePath) {
   return new Promise((resolve, reject) => {
-    const file = fs.createWriteStream(destination)
+    const hash = crypto.createHash('sha256')
+    const input = fs.createReadStream(filePath)
+    input.on('data', (chunk) => hash.update(chunk))
+    input.on('end', () => resolve(hash.digest('hex').toLowerCase()))
+    input.on('error', reject)
+  })
+}
+
+function downloadFile(url, destination, onProgress = () => {}) {
+  return new Promise((resolve, reject) => {
+    const partial = `${destination}.part`
+    const existing = fs.existsSync(partial) ? fs.statSync(partial).size : 0
     const request = net.request(url)
+    if (existing) request.setHeader('Range', `bytes=${existing}-`)
     request.on('response', (response) => {
       if (response.statusCode < 200 || response.statusCode >= 300) return reject(new Error(`Runtime 下载失败：HTTP ${response.statusCode}`))
-      response.pipe(file)
-      file.on('finish', () => file.close(resolve))
+      const append = response.statusCode === 206 && existing > 0
+      const offset = append ? existing : 0
+      if (!append && existing) fs.rmSync(partial, { force: true })
+      const total = offset + Number(response.headers['content-length'] || 0)
+      const file = fs.createWriteStream(partial, { flags: append ? 'a' : 'w' })
+      let received = offset
+      let lastBytes = received
+      let lastTime = Date.now()
+      response.on('data', (chunk) => {
+        received += chunk.length
+        file.write(chunk)
+        const now = Date.now()
+        if (now - lastTime >= 500) {
+          onProgress({ received, total, speed: (received - lastBytes) / ((now - lastTime) / 1000) })
+          lastBytes = received
+          lastTime = now
+        }
+      })
+      response.on('end', () => file.end(() => { fs.rmSync(destination, { force: true }); fs.renameSync(partial, destination); onProgress({ received, total, speed: 0 }); resolve() }))
+      response.on('error', (error) => { file.close(); reject(error) })
+      file.on('error', reject)
     })
     request.on('error', reject)
     request.end()
@@ -106,20 +142,37 @@ function downloadFile(url, destination) {
 async function downloadRuntime(url, target) {
   fs.mkdirSync(target, { recursive: true })
   const manifestPath = path.join(app.getPath('temp'), 'courttrace-runtime.json')
+  sendRuntimeStatus({ stage: '正在获取 Runtime 清单', percent: 1 })
   await downloadFile(url, manifestPath)
   const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'))
   const toolsRoot = app.isPackaged ? path.join(process.resourcesPath, 'tools') : path.join(__dirname, '..', 'node_modules', '7zip-bin', 'win', 'x64')
   const extractor = path.join(toolsRoot, '7za.exe')
   const prefix = path.join(app.getPath('temp'), 'CourtTrace-Runtime.7z')
-  for (const part of manifest.parts) {
+  for (let index = 0; index < manifest.parts.length; index += 1) {
+    const part = manifest.parts[index]
     const partPath = `${prefix}.${String(part.index).padStart(3, '0')}`
-    await downloadFile(new URL(part.name, url).toString(), partPath)
-    const hash = crypto.createHash('sha256').update(fs.readFileSync(partPath)).digest('hex').toLowerCase()
+    if (fs.existsSync(partPath) && part.sha256 && await hashFile(partPath) === part.sha256.toLowerCase()) {
+      sendRuntimeStatus({ stage: `分卷 ${index + 1}/${manifest.parts.length} 已校验`, percent: ((index + 1) / manifest.parts.length) * 88 })
+      continue
+    }
+    fs.rmSync(partPath, { force: true })
+    await downloadFile(new URL(part.name, url).toString(), partPath, ({ received, total, speed }) => {
+      const partProgress = total ? received / total : 0
+      const percent = ((index + partProgress) / manifest.parts.length) * 88
+      const mb = (received / 1024 / 1024).toFixed(0)
+      const totalMb = total ? (total / 1024 / 1024).toFixed(0) : '--'
+      const speedMb = speed ? `${(speed / 1024 / 1024).toFixed(1)} MB/s` : ''
+      sendRuntimeStatus({ stage: `正在下载 Runtime 分卷 ${index + 1}/${manifest.parts.length}`, percent, detail: `${mb} MB / ${totalMb} MB${speedMb ? ` · ${speedMb}` : ''}` })
+    })
+    sendRuntimeStatus({ stage: `正在校验分卷 ${index + 1}/${manifest.parts.length}`, percent: ((index + 1) / manifest.parts.length) * 88 })
+    const hash = await hashFile(partPath)
     if (part.sha256 && hash !== part.sha256.toLowerCase()) throw new Error(`Runtime 分卷校验失败：${part.name}`)
   }
+  sendRuntimeStatus({ stage: '正在解压 Runtime', percent: 92, detail: '解压过程可能需要几分钟，请勿关闭应用。' })
   await new Promise((resolve, reject) => execFile(extractor, ['x', `${prefix}.001`, `-o${target}`, '-y'], (error) => error ? reject(error) : resolve()))
   for (const part of manifest.parts) fs.rmSync(`${prefix}.${String(part.index).padStart(3, '0')}`, { force: true })
   fs.rmSync(manifestPath, { force: true })
+  sendRuntimeStatus({ stage: 'Runtime 准备完成', percent: 100 })
 }
 
 async function ensureRuntime() {
@@ -131,27 +184,36 @@ async function ensureRuntime() {
     return false
   }
   log(`Runtime missing, downloading from ${url}`)
-  try { await downloadRuntime(url, installedRuntime); runtimeRoot = installedRuntime; log(`Runtime downloaded: ${runtimeRoot}`); return true } catch (error) { log(`Runtime download failed: ${error.message}`); dialog.showErrorBox('Runtime 下载失败', error.message); return false }
+  try { await downloadRuntime(url, installedRuntime); runtimeRoot = installedRuntime; log(`Runtime downloaded: ${runtimeRoot}`); return true } catch (error) { log(`Runtime download failed: ${error.message}`); sendRuntimeStatus({ status: 'error', stage: 'Runtime 下载失败', message: '请检查网络连接后重试。', detail: error.message }); return false }
 }
 
-async function createWindow() {
-  const mobileUrl = `http://${lanAddress()}:${backendPort}/mobile?token=${lanToken}`
-  const window = new BrowserWindow({ width: 1440, height: 920, minWidth: 1000, minHeight: 700, webPreferences: { preload: path.join(__dirname, 'preload.cjs'), contextIsolation: true, sandbox: true, additionalArguments: [`--courttrace-api=http://127.0.0.1:${backendPort}`, `--courttrace-mobile=${mobileUrl}`, `--courttrace-version=${app.getVersion()}`] } })
-  mainWindow = window
-  window.show()
-  log('Desktop window created')
-  if (!await ensureRuntime()) { window.destroy(); app.quit(); return }
+async function completeStartup(window) {
+  if (startupRunning) return
+  startupRunning = true
+  if (!await ensureRuntime()) { startupRunning = false; return }
   await ensureFirewallRule()
+  sendRuntimeStatus({ stage: '正在启动本地分析服务', percent: 100 })
   startBackend()
-  try { await waitForBackend(backendPort) } catch (error) { log(`Backend startup timeout: ${error.message}`); dialog.showErrorBox('COURTTRACE 启动失败', error.message); window.destroy(); app.quit(); return }
+  try { await waitForBackend(backendPort) } catch (error) { log(`Backend startup timeout: ${error.message}`); sendRuntimeStatus({ status: 'error', stage: '分析服务启动失败', message: '本地分析服务未能正常启动。', detail: error.message }); startupRunning = false; return }
   const indexPath = app.isPackaged ? path.join(__dirname, '..', 'dist', 'index.html') : path.join(__dirname, '..', 'dist', 'index.html')
   try {
     await window.loadFile(indexPath)
+    startupRunning = false
   } catch (error) {
     dialog.showErrorBox('COURTTRACE 加载失败', error.message)
     window.destroy()
     app.quit()
   }
+}
+
+async function createWindow() {
+  const mobileUrl = `http://${lanAddress()}:${backendPort}/mobile?token=${lanToken}`
+  const window = new BrowserWindow({ width: 1440, height: 920, minWidth: 1000, minHeight: 700, show: false, webPreferences: { preload: path.join(__dirname, 'preload.cjs'), contextIsolation: true, sandbox: true, additionalArguments: [`--courttrace-api=http://127.0.0.1:${backendPort}`, `--courttrace-mobile=${mobileUrl}`, `--courttrace-version=${app.getVersion()}`] } })
+  mainWindow = window
+  await window.loadFile(path.join(__dirname, 'loading.html'))
+  window.show()
+  log('Desktop window created')
+  void completeStartup(window)
 }
 
 function sendUpdateStatus(status, payload = {}) {
@@ -180,9 +242,26 @@ ipcMain.handle('check-for-updates', async () => {
 })
 ipcMain.handle('download-update', async () => { await autoUpdater.downloadUpdate(); return { status: 'downloading' } })
 ipcMain.handle('install-update', () => { autoUpdater.quitAndInstall(); return { status: 'installing' } })
+ipcMain.handle('retry-runtime', async () => {
+  if (backend && !backend.killed) backend.kill()
+  await completeStartup(mainWindow)
+  return { status: 'retrying' }
+})
 
-app.whenReady().then(createWindow)
-app.whenReady().then(() => { if (app.isPackaged) { autoUpdater.checkForUpdates().catch(() => undefined) } })
+const hasSingleInstanceLock = app.requestSingleInstanceLock()
+if (!hasSingleInstanceLock) {
+  app.quit()
+} else {
+  app.on('second-instance', () => {
+    if (mainWindow) {
+      if (mainWindow.isMinimized()) mainWindow.restore()
+      mainWindow.show()
+      mainWindow.focus()
+    }
+  })
+  app.whenReady().then(createWindow)
+  app.whenReady().then(() => { if (app.isPackaged) { autoUpdater.checkForUpdates().catch(() => undefined) } })
+}
 app.on('window-all-closed', () => { if (backend) backend.kill(); if (process.platform !== 'darwin') app.quit() })
 app.on('before-quit', () => { if (backend) backend.kill() })
 process.on('uncaughtException', (error) => { log(`Uncaught exception: ${error.stack || error.message}`); dialog.showErrorBox('COURTTRACE 启动错误', error.message) })

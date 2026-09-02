@@ -1,0 +1,19 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>COURTTRACE 正在启动</title>
+  <style>
+    :root{color-scheme:dark;font-family:"Segoe UI Variable","Microsoft YaHei",sans-serif;background:#0c1110;color:#edf3ed}*{box-sizing:border-box}body{margin:0;min-width:320px;min-height:100vh;background:linear-gradient(90deg,rgba(255,255,255,.018) 1px,transparent 1px) 0 0/80px 80px,#0c1110}main{display:grid;min-height:100vh;place-items:center;padding:24px}.startup{width:min(560px,100%);padding:30px;background:#121917;border:1px solid #314038;border-top:3px solid #d7ff4d;border-radius:7px}.brand{display:flex;align-items:center;gap:12px}.mark{display:grid;width:38px;height:38px;place-items:center;color:#11170c;font-weight:900;background:#d7ff4d;border-radius:50%}.brand strong,.brand small{display:block}.brand strong{font-size:16px;letter-spacing:.08em}.brand small{margin-top:3px;color:#7d8b82;font-size:9px;letter-spacing:.1em}.copy{margin-top:28px}.copy h1{margin:0;font-size:24px}.copy p{margin:8px 0 0;color:#8d9b93;font-size:12px;line-height:1.6}.progress{height:7px;margin-top:22px;overflow:hidden;background:#26342c;border-radius:999px}.progress span{display:block;width:0;height:100%;background:#d7ff4d;transition:width .25s ease}.meta{display:flex;justify-content:space-between;gap:12px;margin-top:10px;color:#a7b5aa;font-family:"Bahnschrift",monospace;font-size:10px}.detail{min-height:18px;margin-top:18px;color:#75847a;font-size:10px;overflow-wrap:anywhere}.error{color:#ff9e8f}button{display:none;width:100%;min-height:40px;margin-top:18px;color:#11170c;font-weight:750;background:#d7ff4d;border:0;border-radius:4px;cursor:pointer}button.visible{display:block}
+  </style>
+</head>
+<body>
+  <main><section class="startup"><div class="brand"><span class="mark">◎</span><span><strong>COURTTRACE</strong><small>LOCAL SCOUTING DESK</small></span></div><div class="copy"><h1 id="title">正在准备运行环境</h1><p id="message">首次启动需要下载并配置本地 AI 运行环境，请保持网络连接。</p></div><div class="progress"><span id="bar"></span></div><div class="meta"><span id="stage">正在检查 Runtime</span><span id="percent">0%</span></div><div class="detail" id="detail"></div><button id="retry">重试</button></section></main>
+  <script>
+    const title=document.querySelector('#title'),message=document.querySelector('#message'),bar=document.querySelector('#bar'),stage=document.querySelector('#stage'),percent=document.querySelector('#percent'),detail=document.querySelector('#detail'),retry=document.querySelector('#retry');
+    window.courtTraceDesktop?.onRuntimeStatus?.((state)=>{const value=Math.max(0,Math.min(100,state.percent||0));bar.style.width=`${value}%`;percent.textContent=`${Math.round(value)}%`;stage.textContent=state.stage||'正在准备';detail.textContent=state.detail||'';detail.classList.toggle('error',state.status==='error');title.textContent=state.status==='error'?'运行环境准备失败':state.title||'正在准备运行环境';message.textContent=state.message||'请保持应用运行和网络连接。';retry.classList.toggle('visible',state.status==='error')});
+    retry.onclick=()=>{retry.classList.remove('visible');window.courtTraceDesktop?.retryRuntime?.()};
+  </script>
+</body>
+</html>
