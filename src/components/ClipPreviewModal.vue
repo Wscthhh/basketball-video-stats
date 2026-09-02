@@ -5,7 +5,7 @@ import { clipSource, statusLabel } from '../presentation'
 import type { Clip, Team } from '../types'
 import TeamColorSwatch from './TeamColorSwatch.vue'
 
-const props = defineProps<{ clip: Clip; homeTeam?: Team; awayTeam?: Team; busy: boolean; reviewClips?: Clip[] }>()
+const props = defineProps<{ clip: Clip; homeTeam?: Team; awayTeam?: Team; busy: boolean; navigationClips?: Clip[] }>()
 const emit = defineEmits<{
   close: []
   confirmTeam: [teamId: string | null]
@@ -21,10 +21,10 @@ const videoRef = ref<HTMLVideoElement | null>(null)
 const selectedTeamId = ref<string | null>(props.clip.teamId ?? null)
 const editingTeam = ref(!props.clip.teamId)
 const teamConfirmed = computed(() => props.clip.teamSource === 'manual')
-const reviewIndex = computed(() => (props.reviewClips ?? []).findIndex((clip) => clip.id === props.clip.id))
-const inReviewQueue = computed(() => reviewIndex.value >= 0)
-const canNavigatePrevious = computed(() => reviewIndex.value > 0)
-const canNavigateNext = computed(() => reviewIndex.value >= 0 && reviewIndex.value < (props.reviewClips?.length ?? 0) - 1)
+const navigationIndex = computed(() => (props.navigationClips ?? []).findIndex((clip) => clip.id === props.clip.id))
+const inNavigationQueue = computed(() => navigationIndex.value >= 0)
+const canNavigatePrevious = computed(() => navigationIndex.value > 0)
+const canNavigateNext = computed(() => navigationIndex.value >= 0 && navigationIndex.value < (props.navigationClips?.length ?? 0) - 1)
 const assignedTeamName = computed(() => {
   const homeTeam = props.homeTeam
   const awayTeam = props.awayTeam
@@ -81,10 +81,10 @@ onBeforeUnmount(() => window.removeEventListener('keydown', handleKeydown))
         <div><span class="panel-kicker">CLIP PREVIEW</span><h2>{{ clip.name }}</h2><p>{{ statusLabel(clip.status) }} · {{ clipSource(clip) }}</p></div>
         <button class="icon-button dark" type="button" title="关闭" @click="$emit('close')"><X :size="18" /></button>
       </div>
-      <div v-if="inReviewQueue" class="clip-review-navigation">
-        <button class="icon-button dark" type="button" title="上一个待确认片段" :disabled="busy || !canNavigatePrevious" @click="emit('navigate', -1)"><ChevronLeft :size="18" /></button>
-        <span>{{ reviewIndex + 1 }} / {{ reviewClips?.length }}</span>
-        <button class="icon-button dark" type="button" title="下一个待确认片段" :disabled="busy || !canNavigateNext" @click="emit('navigate', 1)"><ChevronRight :size="18" /></button>
+       <div v-if="inNavigationQueue" class="clip-review-navigation">
+         <button class="icon-button dark" type="button" title="上一个片段" :disabled="busy || !canNavigatePrevious" @click="emit('navigate', -1)"><ChevronLeft :size="18" /></button>
+         <span>{{ navigationIndex + 1 }} / {{ navigationClips?.length }}</span>
+         <button class="icon-button dark" type="button" title="下一个片段" :disabled="busy || !canNavigateNext" @click="emit('navigate', 1)"><ChevronRight :size="18" /></button>
       </div>
        <div class="highlight-player-video">
          <video v-if="clip.previewUrl" ref="videoRef" controls playsinline :src="clip.previewUrl"></video>
