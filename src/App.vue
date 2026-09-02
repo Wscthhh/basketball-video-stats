@@ -48,11 +48,32 @@ const analysisRun = computed(() => runs.value.find((run) => run.id === pollingRu
 const activeClip = computed(() => clips.value.find((clip) => clip.id === activeClipId.value) ?? null)
 const homeTeam = computed(() => workspace.value?.teams.find((team) => team.side === 'home') ?? match.value?.homeTeam)
 const awayTeam = computed(() => workspace.value?.teams.find((team) => team.side === 'away') ?? match.value?.awayTeam)
+const mobileUploadUrl = computed(() => (window as Window & { courtTraceDesktop?: { mobileUrl?: string } }).courtTraceDesktop?.mobileUrl || '')
 const hasTeamAssignment = (clip: Clip) => Boolean(clip.teamId) && ['ai', 'manual'].includes(clip.teamSource ?? '')
 const unresolvedClips = computed(() => collections.value?.unresolved ?? clips.value.filter((clip) => !hasTeamAssignment(clip)))
 const homeClips = computed(() => collections.value?.home.clips ?? clips.value.filter((clip) => hasTeamAssignment(clip) && clip.teamId === homeTeam.value?.id))
 const awayClips = computed(() => collections.value?.away.clips ?? clips.value.filter((clip) => hasTeamAssignment(clip) && clip.teamId === awayTeam.value?.id))
 const readyModels = computed(() => Object.entries(health.value?.analyzer?.models ?? {}).filter(([, model]) => model.ready).map(([name]) => name).join(' / '))
+type ClipQueueKey = 'unresolved' | 'home' | 'away'
+
+const orderedClipQueue = (queue: Clip[]) => [...queue].sort((a, b) => Number(!(b.teamSource === 'manual' || b.teamConfirmed === true)) - Number(!(a.teamSource === 'manual' || a.teamConfirmed === true)))
+
+function clipQueue(key: ClipQueueKey): Clip[] {
+  if (key === 'unresolved') return unresolvedClips.value
+  return orderedClipQueue(key === 'home' ? homeClips.value : awayClips.value)
+}
+
+function clipQueueKey(clip: Clip): ClipQueueKey | null {
+  if (unresolvedClips.value.some((item) => item.id === clip.id)) return 'unresolved'
+  if (homeClips.value.some((item) => item.id === clip.id)) return 'home'
+  if (awayClips.value.some((item) => item.id === clip.id)) return 'away'
+  return null
+}
+
+const activeClipQueue = computed(() => {
+  const key = activeClip.value ? clipQueueKey(activeClip.value) : null
+  return key ? clipQueue(key) : []
+})
 
 function fail(error: unknown) {
   actionError.value = error instanceof Error ? error.message : '请求失败'
@@ -137,14 +158,14 @@ async function boot() {
 
 async function createMatch() {
   const draft = createDraft.value
-  if (!draft.name.trim() || !draft.homeName.trim() || !draft.awayName.trim()) {
-    fail(new Error('请填写比赛名称和两队名称'))
+  if (!draft.homeName.trim() || !draft.awayName.trim()) {
+    fail(new Error('请填写主队名称和客队名称'))
     return
   }
   busy.value = true
   try {
     const created = await api.createMatch({
-      name: draft.name.trim(),
+      name: `${draft.homeName.trim()} VS ${draft.awayName.trim()}`,
       playedAt: draft.playedAt || undefined,
       venue: draft.venue.trim() || undefined,
       homeTeam: { name: draft.homeName.trim(), color: draft.homeColor },
@@ -280,17 +301,17 @@ async function generateTeamHighlight(teamId: string) {
 }
 
 function navigateReviewClip(direction: -1 | 1) {
-  const index = unresolvedClips.value.findIndex((clip) => clip.id === activeClipId.value)
-  const target = unresolvedClips.value[index + direction]
+  const index = activeClipQueue.value.findIndex((clip) => clip.id === activeClipId.value)
+  const target = activeClipQueue.value[index + direction]
   if (target) activeClipId.value = target.id
 }
 
-function advanceReviewClip(previousId: string, previousIndex: number) {
-  if (!unresolvedClips.value.length) {
+function advanceClip(queue: Clip[], previousId: string, previousIndex: number) {
+  if (!queue.length) {
     closeClip()
     return
   }
-  const next = unresolvedClips.value[previousIndex] ?? unresolvedClips.value[previousIndex - 1]
+  const next = queue[previousIndex] ?? queue[previousIndex - 1]
   if (next && next.id !== previousId) activeClipId.value = next.id
   else closeClip()
 }
@@ -316,9 +337,10 @@ async function setClipTeam(teamId: string | null): Promise<boolean> {
 
 async function confirmClipTeam(teamId: string | null) {
   const previousId = activeClipId.value
-  const previousIndex = unresolvedClips.value.findIndex((clip) => clip.id === previousId)
+  const queueKey = activeClip.value ? clipQueueKey(activeClip.value) : null
+  const previousIndex = queueKey ? clipQueue(queueKey).findIndex((clip) => clip.id === previousId) : -1
   if (await setClipTeam(teamId)) {
-    if (teamId && previousIndex >= 0) advanceReviewClip(previousId, previousIndex)
+    if (teamId && queueKey && previousIndex >= 0) advanceClip(clipQueue(queueKey), previousId, previousIndex)
     else closeClip()
   }
 }
@@ -334,12 +356,13 @@ function cancelReassign() {}
 async function deleteActiveClip() {
   const clip = activeClip.value
   if (!clip || busy.value || !window.confirm(`确定删除片段“${clip.name}”吗？此操作无法撤销。`)) return
-  const reviewIndex = unresolvedClips.value.findIndex((item) => item.id === clip.id)
+  const queueKey = clipQueueKey(clip)
+  const queueIndex = queueKey ? clipQueue(queueKey).findIndex((item) => item.id === clip.id) : -1
   busy.value = true
   try {
     await api.deleteClip(clip.id)
     await refresh()
-    if (reviewIndex >= 0) advanceReviewClip(clip.id, reviewIndex)
+    if (queueKey && queueIndex >= 0) advanceClip(clipQueue(queueKey), clip.id, queueIndex)
     else closeClip()
   } catch (error) {
     fail(error)
@@ -361,7 +384,7 @@ onBeforeUnmount(() => { stopPolling(); stopExportPolling() })
         <div v-if="loadError" class="error-banner"><CircleAlert :size="17" />{{ loadError }}<button class="icon-button" type="button" title="重试" @click="boot"><RefreshCw :size="16" /></button></div>
         <div v-if="actionError" class="error-banner"><CircleAlert :size="17" />{{ actionError }}<button class="icon-button" type="button" title="关闭" @click="actionError = ''"><X :size="16" /></button></div>
         <template v-if="match && workspace">
-           <WorkspaceHeader :match="match" :clip-count="clips.length" :home-clip-count="homeClips.length" :away-clip-count="awayClips.length" :unresolved-count="unresolvedClips.length" :busy="busy" :polling="Boolean(pollingRunId)" :analysis-run="analysisRun" @reanalyze="reanalyzeAll" @import-clips="showImport = true" />
+           <WorkspaceHeader :match="match" :clip-count="clips.length" :home-clip-count="homeClips.length" :away-clip-count="awayClips.length" :unresolved-count="unresolvedClips.length" :busy="busy" :polling="Boolean(pollingRunId)" :analysis-run="analysisRun" :mobile-url="mobileUploadUrl" @reanalyze="reanalyzeAll" @import-clips="showImport = true" />
            <template v-if="tab === 'overview'"><div v-if="trainingStatus?.suggestion" class="training-suggestion"><span><strong>建议训练球队识别模型</strong><small>两队人工训练样本均已达到 {{ trainingStatus.threshold }} 个</small></span><button class="button button-quiet" type="button" :disabled="trainingBusy" @click="trainTeamClassifier">{{ trainingBusy ? '训练中' : '训练模型' }}</button></div><TeamHighlightExports :home-team="homeTeam" :away-team="awayTeam" :exports="teamHighlights" :busy="busy" @generate="generateTeamHighlight" /><MatchOverview :home-team="homeTeam" :away-team="awayTeam" :home-clips="homeClips" :away-clips="awayClips" :unresolved-clips="unresolvedClips" @open-clip="openClip" @export-clip="exportClip" /></template>
           <ClipReviewQueue v-else-if="tab === 'review'" :clips="unresolvedClips" @open-clip="openClip" />
            <ClipLibrary v-else :clips="clips" :busy="busy" :polling="Boolean(pollingRunId)" @open-clip="openClip" @export-clip="exportClip" @reanalyze="reanalyzeAll" @import-clips="showImport = true" />
@@ -372,7 +395,7 @@ onBeforeUnmount(() => { stopPolling(); stopExportPolling() })
 
     <CreateMatchModal v-if="showCreate" v-model:draft="createDraft" :busy="busy" @close="showCreate = false" @submit="createMatch" />
     <ImportClipsModal v-if="showImport" :files="pendingFiles" :busy="busy" @close="showImport = false" @select-files="pendingFiles = $event" @upload="upload" />
-    <ClipPreviewModal v-if="activeClip" :clip="activeClip" :home-team="homeTeam" :away-team="awayTeam" :busy="busy" :review-clips="unresolvedClips" @close="closeClip" @confirm-team="confirmClipTeam" @save-team="reassignClipTeam" @start-reassign="startReassign" @cancel-reassign="cancelReassign" @delete-clip="deleteActiveClip" @export-clip="exportClip" @navigate="navigateReviewClip" />
+    <ClipPreviewModal v-if="activeClip" :clip="activeClip" :home-team="homeTeam" :away-team="awayTeam" :busy="busy" :navigation-clips="activeClipQueue" @close="closeClip" @confirm-team="confirmClipTeam" @save-team="reassignClipTeam" @start-reassign="startReassign" @cancel-reassign="cancelReassign" @delete-clip="deleteActiveClip" @export-clip="exportClip" @navigate="navigateReviewClip" />
   </div>
 </template>
 

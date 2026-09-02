@@ -5,6 +5,7 @@ import hashlib
 import json
 import os
 import re
+import secrets
 import shutil
 import sqlite3
 import subprocess
@@ -16,7 +17,7 @@ from typing import Annotated, Any, Literal
 from fastapi import BackgroundTasks, FastAPI, File, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, HTMLResponse
 from pydantic import BaseModel, ConfigDict, Field
 
 from .analyzer import BasketballAnalyzer, classify_clip_team, resolve_command
@@ -38,15 +39,21 @@ CLIP_TEAM_DATA_DIR.mkdir(parents=True, exist_ok=True)
 TRAINING_ARCHIVE_DIR.mkdir(parents=True, exist_ok=True)
 EXPORT_DIR.mkdir(parents=True, exist_ok=True)
 app = FastAPI(title="COURTTRACE Local Analysis API", version="0.2.0")
-app.add_middleware(CORSMiddleware, allow_origins=["http://127.0.0.1:5173", "http://localhost:5173"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
+app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=False, allow_methods=["*"], allow_headers=["*"])
 app.mount("/media", StaticFiles(directory=UPLOAD_DIR), name="media")
 app.mount("/media-covers", StaticFiles(directory=COVERS_DIR), name="media-covers")
 app.mount("/media-exports", StaticFiles(directory=EXPORT_DIR), name="media-exports")
 ANALYZER = BasketballAnalyzer()
+MOBILE_TOKEN = os.getenv("COURTTRACE_LAN_TOKEN", "")
 
 
 def now() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def require_mobile_token(token: str | None) -> None:
+    if not MOBILE_TOKEN or not token or not secrets.compare_digest(token, MOBILE_TOKEN):
+        raise HTTPException(403, "手机上传链接无效或已失效")
 
 
 def db() -> sqlite3.Connection:
@@ -57,6 +64,7 @@ def db() -> sqlite3.Connection:
 
 
 def init_db() -> None:
+    stale_analysis_dirs: list[Path] = []
     with db() as c:
         c.executescript("""
         CREATE TABLE IF NOT EXISTS clips (id TEXT PRIMARY KEY, match_id TEXT NOT NULL, filename TEXT NOT NULL, stored_path TEXT NOT NULL, sha256 TEXT NOT NULL UNIQUE, size_bytes INTEGER NOT NULL, duration REAL, status TEXT NOT NULL DEFAULT 'queued', confidence REAL NOT NULL DEFAULT 0, created_at TEXT NOT NULL, team_id TEXT, team_source TEXT NOT NULL DEFAULT 'unresolved', team_confidence REAL NOT NULL DEFAULT 0, team_evidence TEXT NOT NULL DEFAULT '无法从片段可靠判断球队');
@@ -138,6 +146,12 @@ def init_db() -> None:
         # A process restart cannot leave a run looking active.
         c.execute("UPDATE analysis_runs SET status='interrupted', error='service restarted', finished_at=? WHERE status='running'", (now(),))
         c.execute("UPDATE clips SET status='queued' WHERE status='processing'")
+        analysis_root = DATA_DIR / "analysis"
+        if analysis_root.is_dir():
+            active_runs = {row["id"] for row in c.execute("SELECT id FROM analysis_runs WHERE status='running'")}
+            stale_analysis_dirs = [path for path in analysis_root.iterdir() if path.is_dir() and path.name not in active_runs]
+    for path in stale_analysis_dirs:
+        shutil.rmtree(path, ignore_errors=True)
 
 
 def row_payload(row: sqlite3.Row | None) -> dict[str, Any] | None:
@@ -451,7 +465,9 @@ async def train_team_classifier_endpoint(match_id: str) -> dict[str, Any]:
 
 
 @app.get("/api/matches")
-async def list_matches(include_test: bool = True) -> list[dict[str, Any]]:
+async def list_matches(include_test: bool = True, token: str | None = None) -> list[dict[str, Any]]:
+    if token is not None:
+        require_mobile_token(token)
     with db() as c:
         rows = c.execute(
             "SELECT * FROM matches ORDER BY created_at DESC" if include_test
@@ -606,7 +622,9 @@ async def delete_clip(clip_id: str) -> dict[str, Any]:
 
 
 @app.get("/api/matches/{match_id}/clips/collections")
-async def clip_collections(match_id: str) -> dict[str, Any]:
+async def clip_collections(match_id: str, token: str | None = None) -> dict[str, Any]:
+    if token is not None:
+        require_mobile_token(token)
     with db() as c:
         require_match(match_id, c)
         teams = {row["side"]: team_payload(row) for row in c.execute("SELECT * FROM teams WHERE match_id=?", (match_id,))}
@@ -697,7 +715,9 @@ async def create_team_highlight(match_id: str, team_id: str, background_tasks: B
 
 
 @app.post("/api/matches/{match_id}/clips")
-async def upload_clips(match_id: str, files: Annotated[list[UploadFile], File(...)]) -> dict[str, Any]:
+async def upload_clips(match_id: str, files: Annotated[list[UploadFile], File(...)], token: str | None = None) -> dict[str, Any]:
+    if token is not None:
+        require_mobile_token(token)
     accepted, skipped = [], []
     with db() as c: require_match(match_id, c)
     for file in files:
@@ -727,6 +747,14 @@ async def upload_clips(match_id: str, files: Annotated[list[UploadFile], File(..
             shutil.rmtree(clip_dir, ignore_errors=True)
             raise
     return {"accepted": accepted, "skipped": skipped}
+
+
+@app.get("/mobile")
+async def mobile_upload_page(token: str | None = None) -> HTMLResponse:
+    require_mobile_token(token)
+    return HTMLResponse("""<!doctype html><html lang='zh-CN'><meta name='viewport' content='width=device-width,initial-scale=1'><title>COURTTRACE 手机上传</title><style>body{margin:0;padding:20px;background:#0d1210;color:#edf3ed;font-family:Arial,sans-serif}main{max-width:620px;margin:auto}h1{font-size:25px}section{padding:18px;background:#17211d;border:1px solid #304137;border-radius:8px}label{display:grid;gap:8px;color:#aab8ac;font-size:13px}select,input,button{font:inherit}select,input{min-height:44px;padding:0 10px;color:#edf3ed;background:#0d1511;border:1px solid #425348;border-radius:5px}input{padding:12px 10px}button{width:100%;min-height:46px;margin-top:14px;color:#0d1210;font-weight:bold;background:#d7ff4d;border:0;border-radius:5px}button:disabled{opacity:.5}.muted{color:#8d9b93;font-size:12px;line-height:1.5}.status{margin-top:14px;color:#d7ff4d;white-space:pre-wrap}</style><main><h1>COURTTRACE 手机上传</h1><p class='muted'>选择比赛后上传多个视频。上传完成后电脑会自动开始分析。</p><section><label>比赛<select id='match'></select></label><label style='margin-top:14px'>视频<input id='files' type='file' accept='video/mp4,video/quicktime,video/webm,.mp4,.mov,.m4v,.webm' multiple></label><button id='upload'>上传并开始分析</button><div id='status' class='status'></div></section></main><script>const token=new URLSearchParams(location.search).get('token');const match=document.querySelector('#match'),files=document.querySelector('#files'),button=document.querySelector('#upload'),status=document.querySelector('#status');async function request(url,options){const response=await fetch(url,options);if(!response.ok)throw new Error((await response.json()).detail||'请求失败');return response.json()}async function boot(){try{const matches=await request(`/api/matches?include_test=false&token=${encodeURIComponent(token)}`);match.innerHTML=matches.map(item=>`<option value="${item.id}">${item.name}</option>`).join('')}catch(error){status.textContent=error.message}}boot();button.onclick=async()=>{if(!match.value||!files.files.length)return status.textContent='请选择比赛和视频';button.disabled=true;status.textContent='正在上传，请保持页面打开...';try{const body=new FormData();for(const file of files.files)body.append('files',file);const result=await request(`/api/matches/${encodeURIComponent(match.value)}/clips?token=${encodeURIComponent(token)}`,{method:'POST',body});if(result.accepted.length){await request(`/api/matches/${encodeURIComponent(match.value)}/analyze?token=${encodeURIComponent(token)}`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({clipIds:result.accepted.map(item=>item.id),device:'auto'})})}status.textContent=`上传完成：${result.accepted.length} 个\n跳过重复或不支持：${result.skipped.length} 个\n电脑端已开始分析。`;files.value=''}catch(error){status.textContent=error.message}finally{button.disabled=false}}</script></html>", { media_type: "text/html" })
+
+    """, media_type="text/html")
 
 
 def stats_for(c: sqlite3.Connection, match_id: str) -> list[dict[str, Any]]:
@@ -1266,7 +1294,9 @@ async def run_analysis(run_id: str, match_id: str, clip_ids: list[str], device: 
 
 
 @app.post("/api/matches/{match_id}/analyze")
-async def analyze(match_id: str, request: AnalyzeRequest) -> dict[str, Any]:
+async def analyze(match_id: str, request: AnalyzeRequest, token: str | None = None) -> dict[str, Any]:
+    if token is not None:
+        require_mobile_token(token)
     with db() as c:
         c.execute("BEGIN IMMEDIATE")
         require_match(match_id, c)

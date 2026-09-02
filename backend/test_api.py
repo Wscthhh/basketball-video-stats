@@ -21,6 +21,7 @@ class ApiTest(unittest.TestCase):
         self.old_category_data_dir = main.CATEGORY_DATA_DIR
         self.old_clip_team_data_dir = main.CLIP_TEAM_DATA_DIR
         self.old_training_archive_dir = main.TRAINING_ARCHIVE_DIR
+        self.old_mobile_token = main.MOBILE_TOKEN
         main.DB_PATH = Path(self.temp.name) / "test.sqlite3"
         main.DATA_DIR = Path(self.temp.name) / "data"
         main.UPLOAD_DIR = main.DATA_DIR / "uploads"
@@ -50,6 +51,7 @@ class ApiTest(unittest.TestCase):
         main.CATEGORY_DATA_DIR = self.old_category_data_dir
         main.CLIP_TEAM_DATA_DIR = self.old_clip_team_data_dir
         main.TRAINING_ARCHIVE_DIR = self.old_training_archive_dir
+        main.MOBILE_TOKEN = self.old_mobile_token
         self.temp.cleanup()
 
     def test_match_teams_workspace_and_test_filter(self) -> None:
@@ -90,6 +92,15 @@ class ApiTest(unittest.TestCase):
         main.init_db()
         with main.db() as c:
             self.assertEqual(c.execute("SELECT status FROM clips WHERE id='stale-clip'").fetchone()["status"], "queued")
+
+    def test_mobile_upload_page_requires_token(self) -> None:
+        match_id = self.client.post("/api/matches", json={"name": "Mobile", "homeTeam": {"name": "Home"}, "awayTeam": {"name": "Away"}}).json()["id"]
+        main.MOBILE_TOKEN = "test-token"
+        self.assertEqual(self.client.get("/mobile").status_code, 403)
+        response = self.client.get("/mobile?token=test-token")
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("COURTTRACE 手机上传", response.text)
+        self.assertEqual(self.client.get(f"/api/matches/{match_id}/clips/collections?token=bad").status_code, 403)
 
     def test_delete_match_preserves_training_archives(self) -> None:
         match_id = self.client.post("/api/matches", json={"name": "Delete me", "homeTeam": {"name": "Home"}, "awayTeam": {"name": "Away"}}).json()["id"]

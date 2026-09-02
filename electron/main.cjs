@@ -6,10 +6,18 @@ const fs = require('fs')
 const { execFile } = require('child_process')
 const { autoUpdater } = require('electron-updater')
 const crypto = require('crypto')
+const os = require('os')
 
 let backend
 let backendPort = 8000
 let runtimeRoot
+const lanToken = crypto.randomBytes(24).toString('hex')
+
+function lanAddress() {
+  const interfaces = os.networkInterfaces()
+  for (const entries of Object.values(interfaces)) for (const entry of entries || []) if (entry.family === 'IPv4' && !entry.internal) return entry.address
+  return '127.0.0.1'
+}
 
 function installedRuntimePath() {
   return path.join(process.env.LOCALAPPDATA || app.getPath('userData'), 'COURTTRACE', 'runtime')
@@ -46,7 +54,7 @@ function startBackend() {
   log(`Starting backend: ${executable || 'python'} in ${resourceRoot}`)
   backend = spawn(executable || process.env.COURTTRACE_PYTHON || 'python', args, {
     cwd: resourceRoot,
-    env: { ...process.env, PATH: ffmpegRoot ? `${ffmpegRoot}${path.delimiter}${process.env.PATH || ''}` : process.env.PATH, COURTTRACE_APP_ROOT: resourceRoot, COURTTRACE_DATA_DIR: path.join(app.getPath('userData'), 'data') },
+    env: { ...process.env, PATH: ffmpegRoot ? `${ffmpegRoot}${path.delimiter}${process.env.PATH || ''}` : process.env.PATH, COURTTRACE_APP_ROOT: resourceRoot, COURTTRACE_DATA_DIR: path.join(app.getPath('userData'), 'data'), COURTTRACE_HOST: '0.0.0.0', COURTTRACE_LAN_TOKEN: lanToken },
     windowsHide: true,
     stdio: 'ignore',
   })
@@ -107,7 +115,8 @@ async function ensureRuntime() {
 }
 
 async function createWindow() {
-  const window = new BrowserWindow({ width: 1440, height: 920, minWidth: 1000, minHeight: 700, webPreferences: { preload: path.join(__dirname, 'preload.cjs'), contextIsolation: true, sandbox: true, additionalArguments: [`--courttrace-api=http://127.0.0.1:${backendPort}`] } })
+  const mobileUrl = `http://${lanAddress()}:${backendPort}/mobile?token=${lanToken}`
+  const window = new BrowserWindow({ width: 1440, height: 920, minWidth: 1000, minHeight: 700, webPreferences: { preload: path.join(__dirname, 'preload.cjs'), contextIsolation: true, sandbox: true, additionalArguments: [`--courttrace-api=http://127.0.0.1:${backendPort}`, `--courttrace-mobile=${mobileUrl}`] } })
   window.show()
   log('Desktop window created')
   if (!await ensureRuntime()) { window.destroy(); app.quit(); return }
