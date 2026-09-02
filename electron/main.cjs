@@ -14,6 +14,7 @@ let runtimeRoot
 let mainWindow
 let manualUpdateCheck = false
 let startupRunning = false
+let backendEnvironment
 const lanToken = crypto.randomBytes(24).toString('hex')
 const requiredRuntimeVersion = '0.1.1'
 
@@ -25,6 +26,69 @@ function lanAddress() {
 
 function installedRuntimePath() {
   return path.join(process.env.LOCALAPPDATA || app.getPath('userData'), 'COURTTRACE', 'runtime')
+}
+
+function pathExists(filePath) {
+  try { return fs.existsSync(filePath) } catch (_) { return false }
+}
+
+function execFileResult(file, args, options = {}) {
+  return new Promise((resolve) => {
+    execFile(file, args, { windowsHide: true, timeout: 30000, ...options }, (error, stdout, stderr) => resolve({ ok: !error, stdout: String(stdout || '').trim(), stderr: String(stderr || '').trim() }))
+  })
+}
+
+function configuredEnvironment() {
+  try {
+    const value = JSON.parse(fs.readFileSync(path.join(app.getPath('userData'), 'desktop-config.json'), 'utf8'))
+    return value.python && value.appRoot ? value : null
+  } catch (_) { return null }
+}
+
+async function candidateProjectRoots() {
+  const roots = new Set()
+  const configured = configuredEnvironment()
+  if (configured?.appRoot) roots.add(configured.appRoot)
+  if (process.env.COURTTRACE_APP_ROOT) roots.add(process.env.COURTTRACE_APP_ROOT)
+  roots.add(process.cwd())
+  roots.add(path.join(app.getPath('documents'), 'basketball-video-stats'))
+  roots.add(path.join(app.getPath('desktop'), 'basketball-video-stats'))
+  if (process.platform === 'win32') {
+    const drives = await execFileResult('powershell.exe', ['-NoProfile', '-Command', '(Get-PSDrive -PSProvider FileSystem).Root'])
+    for (const drive of drives.stdout.split(/\r?\n/).filter(Boolean)) roots.add(path.join(drive, 'basketball-video-stats'))
+  }
+  return [...roots]
+}
+
+async function validateExistingEnvironment(root) {
+  const configured = configuredEnvironment()
+  if (!pathExists(path.join(root, 'backend', 'main.py'))) return null
+  const systemPython = await execFileResult('where.exe', ['python.exe'])
+  const pythonCandidates = [...new Set([configured?.appRoot === root ? configured.python : '', process.env.COURTTRACE_PYTHON || '', path.join(root, '.venv', 'Scripts', 'python.exe'), ...systemPython.stdout.split(/\r?\n/)].filter(Boolean))]
+  const models = ['player_detector.pt', 'ball_detector_model.pt', 'court_keypoint_detector.pt']
+  if (!models.every((name) => pathExists(path.join(root, 'models', name)))) return null
+  const ffmpeg = await execFileResult('where.exe', ['ffmpeg.exe'])
+  if (!ffmpeg.ok) return null
+  for (const python of pythonCandidates.filter(pathExists)) {
+    const probe = await execFileResult(python, ['-c', "import sys,fastapi,uvicorn,torch,ultralytics,cv2; print(f'{sys.version_info.major}.{sys.version_info.minor}|{int(torch.cuda.is_available())}')"], { cwd: root })
+    if (/^(3\.11|3\.12)\|[01]$/.test(probe.stdout)) return { type: 'python', python, appRoot: root, ffmpegDir: path.dirname(ffmpeg.stdout.split(/\r?\n/)[0]), details: probe.stdout }
+  }
+  return null
+}
+
+async function findExistingEnvironment() {
+  sendRuntimeStatus({ stage: '正在检测现有 AI 环境', percent: 3, detail: '检查 Python、PyTorch、FFmpeg 和模型文件。' })
+  for (const root of await candidateProjectRoots()) {
+    const environment = await validateExistingEnvironment(root)
+    if (environment) {
+      log(`Using existing environment: ${environment.python}, root=${environment.appRoot}, probe=${environment.details}`)
+      try { fs.writeFileSync(path.join(app.getPath('userData'), 'desktop-config.json'), JSON.stringify({ python: environment.python, appRoot: environment.appRoot }, null, 2)) } catch (_) {}
+      sendRuntimeStatus({ stage: '检测到可用的本地环境', percent: 100, detail: environment.appRoot })
+      return environment
+    }
+  }
+  log('No compatible existing environment found')
+  return null
 }
 
 function log(message) {
@@ -51,14 +115,14 @@ function waitForBackend(port, attempts = 40) {
 }
 
 function startBackend() {
-  const resourceRoot = app.isPackaged ? runtimeRoot : path.join(__dirname, '..')
-  const executable = app.isPackaged ? path.join(resourceRoot, 'backend', 'CourtTraceBackend', 'CourtTraceBackend.exe') : null
-  const args = executable ? ['--host', '0.0.0.0', '--port', String(backendPort)] : ['-m', 'uvicorn', 'backend.main:app', '--host', '0.0.0.0', '--port', String(backendPort)]
-  const ffmpegRoot = app.isPackaged ? path.join(resourceRoot, 'ffmpeg') : ''
-  log(`Starting backend: ${executable || 'python'} in ${resourceRoot}`)
-  backend = spawn(executable || process.env.COURTTRACE_PYTHON || 'python', args, {
-    cwd: resourceRoot,
-    env: { ...process.env, PATH: ffmpegRoot ? `${ffmpegRoot}${path.delimiter}${process.env.PATH || ''}` : process.env.PATH, COURTTRACE_APP_ROOT: resourceRoot, COURTTRACE_DATA_DIR: path.join(app.getPath('userData'), 'data'), COURTTRACE_HOST: '0.0.0.0', COURTTRACE_LAN_TOKEN: lanToken },
+  const environment = backendEnvironment || { type: 'python', python: process.env.COURTTRACE_PYTHON || 'python', appRoot: path.join(__dirname, '..'), ffmpegDir: '' }
+  const executable = environment.type === 'runtime' ? path.join(environment.appRoot, 'backend', 'CourtTraceBackend', 'CourtTraceBackend.exe') : environment.python
+  const args = environment.type === 'runtime' ? ['--host', '0.0.0.0', '--port', String(backendPort)] : ['-m', 'uvicorn', 'backend.main:app', '--host', '0.0.0.0', '--port', String(backendPort)]
+  const ffmpegRoot = environment.ffmpegDir || ''
+  log(`Starting backend: ${executable} in ${environment.appRoot}`)
+  backend = spawn(executable, args, {
+    cwd: environment.appRoot,
+    env: { ...process.env, PATH: ffmpegRoot ? `${ffmpegRoot}${path.delimiter}${process.env.PATH || ''}` : process.env.PATH, COURTTRACE_APP_ROOT: environment.appRoot, COURTTRACE_DATA_DIR: path.join(app.getPath('userData'), 'data'), COURTTRACE_HOST: '0.0.0.0', COURTTRACE_LAN_TOKEN: lanToken },
     windowsHide: true,
     stdio: 'ignore',
   })
@@ -67,8 +131,8 @@ function startBackend() {
 }
 
 function ensureFirewallRule() {
-  if (process.platform !== 'win32' || !app.isPackaged) return Promise.resolve()
-  const executable = path.join(runtimeRoot, 'backend', 'CourtTraceBackend', 'CourtTraceBackend.exe')
+  if (process.platform !== 'win32' || !app.isPackaged || process.env.COURTTRACE_SKIP_FIREWALL === '1') return Promise.resolve()
+  const executable = backendEnvironment?.type === 'python' ? backendEnvironment.python : path.join(runtimeRoot, 'backend', 'CourtTraceBackend', 'CourtTraceBackend.exe')
   return new Promise((resolve) => {
     execFile('powershell.exe', ['-NoProfile', '-Command', "if (Get-NetFirewallRule -DisplayName 'COURTTRACE Mobile Upload' -ErrorAction SilentlyContinue) { exit 0 } else { exit 1 }"], (error) => {
       if (!error) return resolve()
@@ -177,14 +241,17 @@ async function downloadRuntime(url, target) {
 
 async function ensureRuntime() {
   const installedRuntime = installedRuntimePath()
-  if (!app.isPackaged || runtimeReady()) { runtimeRoot = app.isPackaged ? installedRuntime : path.join(__dirname, '..'); log(`Using runtime: ${runtimeRoot}`); return true }
+  if (!app.isPackaged) { backendEnvironment = { type: 'python', python: process.env.COURTTRACE_PYTHON || path.join(__dirname, '..', '.venv', 'Scripts', 'python.exe'), appRoot: path.join(__dirname, '..'), ffmpegDir: '' }; return true }
+  if (runtimeReady()) { runtimeRoot = installedRuntime; backendEnvironment = { type: 'runtime', appRoot: installedRuntime, ffmpegDir: path.join(installedRuntime, 'ffmpeg') }; log(`Using runtime: ${runtimeRoot}`); return true }
+  const existing = await findExistingEnvironment()
+  if (existing) { backendEnvironment = existing; runtimeRoot = existing.appRoot; return true }
   const url = process.env.COURTTRACE_RUNTIME_URL || 'https://github.com/Wscthhh/basketball-video-stats/releases/download/runtime-v0.1.1/CourtTrace-Runtime-0.1.1.json'
   if (!url) {
     dialog.showErrorBox('COURTTRACE 需要运行环境', '首次启动需要下载独立 Runtime。请配置 COURTTRACE_RUNTIME_URL，或先安装 Runtime 包。')
     return false
   }
   log(`Runtime missing, downloading from ${url}`)
-  try { await downloadRuntime(url, installedRuntime); runtimeRoot = installedRuntime; log(`Runtime downloaded: ${runtimeRoot}`); return true } catch (error) { log(`Runtime download failed: ${error.message}`); sendRuntimeStatus({ status: 'error', stage: 'Runtime 下载失败', message: '请检查网络连接后重试。', detail: error.message }); return false }
+  try { await downloadRuntime(url, installedRuntime); runtimeRoot = installedRuntime; backendEnvironment = { type: 'runtime', appRoot: installedRuntime, ffmpegDir: path.join(installedRuntime, 'ffmpeg') }; log(`Runtime downloaded: ${runtimeRoot}`); return true } catch (error) { log(`Runtime download failed: ${error.message}`); sendRuntimeStatus({ status: 'error', stage: 'Runtime 下载失败', message: '请检查网络连接后重试。', detail: error.message }); return false }
 }
 
 async function completeStartup(window) {

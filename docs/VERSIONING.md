@@ -54,6 +54,8 @@ Runtime 单独维护版本，不随普通应用更新重复下载：
 %LOCALAPPDATA%\COURTTRACE\runtime
 ```
 
+桌面端在下载 Runtime 前会检查用户配置、`COURTTRACE_APP_ROOT` / `COURTTRACE_PYTHON`、项目目录 `.venv` 和系统 Python。只有 Python 3.11/3.12、核心依赖、FFmpeg、后端源码与三个模型全部可用时才复用现有环境；环境不完整时必须回退标准 Runtime，不能仅凭 `python.exe` 存在就跳过安装。
+
 只有 Python 依赖、FFmpeg、Torch 或后端兼容性发生变化时，才发布新的 Runtime 安装包。
 
 Runtime 版本发生变化时，必须同步更新：
