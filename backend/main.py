@@ -14,10 +14,10 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Annotated, Any, Literal
 
-from fastapi import BackgroundTasks, FastAPI, File, HTTPException, UploadFile
+from fastapi import BackgroundTasks, FastAPI, File, HTTPException, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import FileResponse, HTMLResponse, StreamingResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field
 
 from .analyzer import BasketballAnalyzer, classify_clip_team, resolve_command
@@ -55,6 +55,18 @@ def now() -> str:
 def require_mobile_token(token: str | None) -> None:
     if not MOBILE_TOKEN or not token or not secrets.compare_digest(token, MOBILE_TOKEN):
         raise HTTPException(403, "手机上传链接无效或已失效")
+
+
+@app.middleware("http")
+async def protect_lan_api(request: Request, call_next):
+    client = request.client.host if request.client else ""
+    if MOBILE_TOKEN and client not in {"127.0.0.1", "::1", "localhost", "testclient"}:
+        path = request.url.path
+        mobile_api = path == "/mobile" or path == "/api/matches" or bool(re.fullmatch(r"/api/matches/[^/]+/(clips|analyze)", path))
+        token = request.query_params.get("token")
+        if not mobile_api or not token or not secrets.compare_digest(token, MOBILE_TOKEN):
+            return JSONResponse({"detail": "局域网请求无权访问此接口"}, status_code=403)
+    return await call_next(request)
 
 
 async def publish_event(match_id: str, event_type: str, payload: dict[str, Any] | None = None) -> None:

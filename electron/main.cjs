@@ -14,11 +14,12 @@ let runtimeRoot
 let mainWindow
 let manualUpdateCheck = false
 const lanToken = crypto.randomBytes(24).toString('hex')
+const requiredRuntimeVersion = '0.1.1'
 
 function lanAddress() {
   const interfaces = os.networkInterfaces()
-  for (const entries of Object.values(interfaces)) for (const entry of entries || []) if (entry.family === 'IPv4' && !entry.internal) return entry.address
-  return '127.0.0.1'
+  const addresses = Object.values(interfaces).flatMap((entries) => entries || []).filter((entry) => entry.family === 'IPv4' && !entry.internal && !entry.address.startsWith('169.254.'))
+  return addresses.find((entry) => /^192\.168\.|^10\.|^172\.(1[6-9]|2\d|3[01])\./.test(entry.address))?.address || addresses[0]?.address || '127.0.0.1'
 }
 
 function installedRuntimePath() {
@@ -51,7 +52,7 @@ function waitForBackend(port, attempts = 40) {
 function startBackend() {
   const resourceRoot = app.isPackaged ? runtimeRoot : path.join(__dirname, '..')
   const executable = app.isPackaged ? path.join(resourceRoot, 'backend', 'CourtTraceBackend', 'CourtTraceBackend.exe') : null
-  const args = executable ? ['--port', String(backendPort)] : ['-m', 'uvicorn', 'backend.main:app', '--host', '127.0.0.1', '--port', String(backendPort)]
+  const args = executable ? ['--host', '0.0.0.0', '--port', String(backendPort)] : ['-m', 'uvicorn', 'backend.main:app', '--host', '0.0.0.0', '--port', String(backendPort)]
   const ffmpegRoot = app.isPackaged ? path.join(resourceRoot, 'ffmpeg') : ''
   log(`Starting backend: ${executable || 'python'} in ${resourceRoot}`)
   backend = spawn(executable || process.env.COURTTRACE_PYTHON || 'python', args, {
@@ -64,10 +65,27 @@ function startBackend() {
   backend.on('exit', (code) => { log(`Backend exited: ${code}`); if (code && app.isReady()) dialog.showErrorBox('COURTTRACE 后端已退出', `服务退出代码：${code}`) })
 }
 
+function ensureFirewallRule() {
+  if (process.platform !== 'win32' || !app.isPackaged) return Promise.resolve()
+  const executable = path.join(runtimeRoot, 'backend', 'CourtTraceBackend', 'CourtTraceBackend.exe')
+  return new Promise((resolve) => {
+    execFile('powershell.exe', ['-NoProfile', '-Command', "if (Get-NetFirewallRule -DisplayName 'COURTTRACE Mobile Upload' -ErrorAction SilentlyContinue) { exit 0 } else { exit 1 }"], (error) => {
+      if (!error) return resolve()
+      const args = `advfirewall firewall add rule name="COURTTRACE Mobile Upload" dir=in action=allow program="${executable}" protocol=TCP localport=8000 profile=private,public enable=yes`
+      execFile('powershell.exe', ['-NoProfile', '-WindowStyle', 'Hidden', '-Command', `Start-Process -FilePath netsh.exe -ArgumentList '${args.replaceAll("'", "''")}' -Verb RunAs -Wait`], (elevatedError) => {
+        log(elevatedError ? `Firewall rule was not added: ${elevatedError.message}` : 'Firewall rule added')
+        resolve()
+      })
+    })
+  })
+}
+
 function runtimeReady() {
   const root = installedRuntimePath()
-  const ready = fs.existsSync(path.join(root, 'backend', 'CourtTraceBackend', 'CourtTraceBackend.exe')) && fs.existsSync(path.join(root, 'ffmpeg', 'ffmpeg.exe')) && fs.existsSync(path.join(root, 'models', 'player_detector.pt'))
-  log(`Runtime check: ${root}, ready=${ready}`)
+  let version = ''
+  try { version = JSON.parse(fs.readFileSync(path.join(root, 'version.json'), 'utf8')).version || '' } catch (_) {}
+  const ready = version === requiredRuntimeVersion && fs.existsSync(path.join(root, 'backend', 'CourtTraceBackend', 'CourtTraceBackend.exe')) && fs.existsSync(path.join(root, 'ffmpeg', 'ffmpeg.exe')) && fs.existsSync(path.join(root, 'models', 'player_detector.pt'))
+  log(`Runtime check: ${root}, version=${version || 'legacy'}, required=${requiredRuntimeVersion}, ready=${ready}`)
   return ready
 }
 
@@ -107,7 +125,7 @@ async function downloadRuntime(url, target) {
 async function ensureRuntime() {
   const installedRuntime = installedRuntimePath()
   if (!app.isPackaged || runtimeReady()) { runtimeRoot = app.isPackaged ? installedRuntime : path.join(__dirname, '..'); log(`Using runtime: ${runtimeRoot}`); return true }
-  const url = process.env.COURTTRACE_RUNTIME_URL || 'https://github.com/Wscthhh/basketball-video-stats/releases/download/runtime-v0.1.0/CourtTrace-Runtime-0.1.0.json'
+  const url = process.env.COURTTRACE_RUNTIME_URL || 'https://github.com/Wscthhh/basketball-video-stats/releases/download/runtime-v0.1.1/CourtTrace-Runtime-0.1.1.json'
   if (!url) {
     dialog.showErrorBox('COURTTRACE 需要运行环境', '首次启动需要下载独立 Runtime。请配置 COURTTRACE_RUNTIME_URL，或先安装 Runtime 包。')
     return false
@@ -123,6 +141,7 @@ async function createWindow() {
   window.show()
   log('Desktop window created')
   if (!await ensureRuntime()) { window.destroy(); app.quit(); return }
+  await ensureFirewallRule()
   startBackend()
   try { await waitForBackend(backendPort) } catch (error) { log(`Backend startup timeout: ${error.message}`); dialog.showErrorBox('COURTTRACE 启动失败', error.message); window.destroy(); app.quit(); return }
   const indexPath = app.isPackaged ? path.join(__dirname, '..', 'dist', 'index.html') : path.join(__dirname, '..', 'dist', 'index.html')

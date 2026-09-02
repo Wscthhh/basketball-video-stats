@@ -4,7 +4,7 @@ const apiArgument = process.argv.find((value) => value.startsWith('--courttrace-
 const mobileArgument = process.argv.find((value) => value.startsWith('--courttrace-mobile='))
 const versionArgument = process.argv.find((value) => value.startsWith('--courttrace-version='))
 contextBridge.exposeInMainWorld('courtTraceDesktop', {
-  version: versionArgument?.slice('--courttrace-version='.length) || '0.1.6',
+  version: versionArgument?.slice('--courttrace-version='.length) || '0.1.7',
   apiBase: apiArgument?.slice('--courttrace-api='.length) || '',
   mobileUrl: mobileArgument?.slice('--courttrace-mobile='.length) || '',
   checkForUpdates: () => ipcRenderer.invoke('check-for-updates'),
