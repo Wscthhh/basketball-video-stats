@@ -31,6 +31,8 @@ const pendingFiles = ref<File[]>([])
 const busy = ref(false)
 const pollTimer = ref<number>()
 const exportPollTimer = ref<number>()
+const eventFallbackTimer = ref<number>()
+const eventSource = ref<EventSource | null>(null)
 const pollingRunId = ref('')
 const createDraft = ref<CreateMatchDraft>({
   name: '',
@@ -103,6 +105,7 @@ async function loadWorkspace(matchId: string) {
     collections.value = collectionResponse ?? fallbackCollections(result)
     teamHighlights.value = exportResponse
     trainingStatus.value = trainingResponse
+    startEventStream(matchId)
     if (teamHighlights.value.some((item) => item.status === 'queued' || item.status === 'running')) startExportPolling()
     if (activeClipId.value && !result.clips.some((clip) => clip.id === activeClipId.value)) activeClipId.value = ''
     const activeRun = result.runs.find((run) => run.status === 'running')
@@ -111,6 +114,39 @@ async function loadWorkspace(matchId: string) {
     loadError.value = error instanceof Error ? error.message : '工作区加载失败'
     workspace.value = null
     collections.value = null
+  }
+}
+
+function stopEventStream() {
+  eventSource.value?.close()
+  eventSource.value = null
+  if (eventFallbackTimer.value) window.clearInterval(eventFallbackTimer.value)
+  eventFallbackTimer.value = undefined
+}
+
+function startEventStream(matchId: string) {
+  const desktop = (window as Window & { courtTraceDesktop?: { apiBase?: string } }).courtTraceDesktop
+  const base = desktop?.apiBase || (window as Window & { __COURTTRACE_API__?: string }).__COURTTRACE_API__ || ''
+  if (eventSource.value) return
+  const source = new EventSource(`${base}/api/matches/${encodeURIComponent(matchId)}/events/stream`)
+  eventSource.value = source
+  source.onopen = () => {
+    if (eventFallbackTimer.value) window.clearInterval(eventFallbackTimer.value)
+    eventFallbackTimer.value = undefined
+  }
+  const refreshOnEvent = () => { void refresh() }
+  source.addEventListener('clip.uploaded', refreshOnEvent)
+  source.addEventListener('analysis.started', refreshOnEvent)
+  source.addEventListener('analysis.completed', refreshOnEvent)
+  source.addEventListener('analysis.failed', refreshOnEvent)
+  source.addEventListener('analysis.progress', (event) => {
+    const payload = JSON.parse((event as MessageEvent).data) as Run & { runId?: string }
+    if (workspace.value && payload.runId) workspace.value.runs = [payload, ...runs.value.filter((item) => item.id !== payload.runId)]
+    if (payload.runId && !pollingRunId.value) startPolling(payload.runId)
+  })
+  source.onerror = () => {
+    if (eventFallbackTimer.value) return
+    eventFallbackTimer.value = window.setInterval(() => { void refresh() }, 5000)
   }
 }
 
@@ -372,7 +408,7 @@ async function deleteActiveClip() {
 }
 
 onMounted(boot)
-onBeforeUnmount(() => { stopPolling(); stopExportPolling() })
+onBeforeUnmount(() => { stopPolling(); stopExportPolling(); stopEventStream() })
 </script>
 
 <template>

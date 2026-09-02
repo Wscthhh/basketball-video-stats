@@ -17,7 +17,7 @@ from typing import Annotated, Any, Literal
 from fastapi import BackgroundTasks, FastAPI, File, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import FileResponse, HTMLResponse
+from fastapi.responses import FileResponse, HTMLResponse, StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field
 
 from .analyzer import BasketballAnalyzer, classify_clip_team, resolve_command
@@ -45,6 +45,7 @@ app.mount("/media-covers", StaticFiles(directory=COVERS_DIR), name="media-covers
 app.mount("/media-exports", StaticFiles(directory=EXPORT_DIR), name="media-exports")
 ANALYZER = BasketballAnalyzer()
 MOBILE_TOKEN = os.getenv("COURTTRACE_LAN_TOKEN", "")
+SSE_SUBSCRIBERS: dict[str, set[asyncio.Queue[dict[str, Any]]]] = {}
 
 
 def now() -> str:
@@ -54,6 +55,15 @@ def now() -> str:
 def require_mobile_token(token: str | None) -> None:
     if not MOBILE_TOKEN or not token or not secrets.compare_digest(token, MOBILE_TOKEN):
         raise HTTPException(403, "手机上传链接无效或已失效")
+
+
+async def publish_event(match_id: str, event_type: str, payload: dict[str, Any] | None = None) -> None:
+    message = {"type": event_type, "matchId": match_id, **(payload or {})}
+    for queue in list(SSE_SUBSCRIBERS.get(match_id, set())):
+        try:
+            queue.put_nowait(message)
+        except asyncio.QueueFull:
+            pass
 
 
 def db() -> sqlite3.Connection:
@@ -476,6 +486,33 @@ async def list_matches(include_test: bool = True, token: str | None = None) -> l
     with db() as c: return [match_payload(c, r) for r in rows]
 
 
+@app.get("/api/matches/{match_id}/events/stream")
+async def event_stream(match_id: str, token: str | None = None) -> StreamingResponse:
+    with db() as c:
+        require_match(match_id, c)
+    if token is not None:
+        require_mobile_token(token)
+    queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue(maxsize=32)
+    subscribers = SSE_SUBSCRIBERS.setdefault(match_id, set())
+    subscribers.add(queue)
+
+    async def stream():
+        try:
+            yield "event: ready\ndata: {}\n\n"
+            while True:
+                try:
+                    message = await asyncio.wait_for(queue.get(), timeout=15)
+                    yield f"event: {message['type']}\ndata: {json.dumps(message, ensure_ascii=False)}\n\n"
+                except asyncio.TimeoutError:
+                    yield ": keep-alive\n\n"
+        finally:
+            subscribers.discard(queue)
+            if not subscribers:
+                SSE_SUBSCRIBERS.pop(match_id, None)
+
+    return StreamingResponse(stream(), media_type="text/event-stream", headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+
+
 @app.post("/api/matches", status_code=201)
 async def create_match(data: MatchInput) -> dict[str, Any]:
     for team in (data.home_team, data.away_team):
@@ -746,6 +783,8 @@ async def upload_clips(match_id: str, files: Annotated[list[UploadFile], File(..
         except Exception:
             shutil.rmtree(clip_dir, ignore_errors=True)
             raise
+    if accepted:
+        await publish_event(match_id, "clip.uploaded", {"clipIds": [clip["id"] for clip in accepted], "count": len(accepted)})
     return {"accepted": accepted, "skipped": skipped}
 
 
@@ -1197,6 +1236,7 @@ async def run_analysis(run_id: str, match_id: str, clip_ids: list[str], device: 
                 with db() as c:
                     c.execute("UPDATE clips SET status='failed' WHERE id=?", (clip_id,))
                     c.execute("UPDATE analysis_runs SET progress=?,completed_clips=?,details_json=? WHERE id=?", (round(index / max(len(clip_ids), 1) * 100, 1), index, json.dumps({"errors": errors}), run_id))
+                await publish_event(match_id, "analysis.progress", {"runId": run_id, "completed": index, "total": len(clip_ids), "progress": round(index / max(len(clip_ids), 1) * 100, 1), "errors": errors})
                 shutil.rmtree(analysis_dir, ignore_errors=True)
                 continue
             with db() as c:
@@ -1281,16 +1321,20 @@ async def run_analysis(run_id: str, match_id: str, clip_ids: list[str], device: 
                         c.execute(f"UPDATE analysis_events SET {assignments} WHERE id=:id", {**update, "id": existing["id"]})
                     else:
                         c.execute("INSERT INTO analysis_events(id,clip_id,event_type,seconds,confidence,status,description,source,run_id,fingerprint,local_track_key,player_id,team_id,team_confidence,team_evidence,shot_type,shot_type_confidence,shot_type_source,court_x,court_y,homography_confidence,release_frame,updated_at,points,confirmed_at,confirmed_by,confirmation_rule,highlight_start,highlight_end) VALUES(" + ",".join("?" for _ in range(29)) + ")", (f"ai-{uuid.uuid4().hex}",clip_id,event_type,candidate.seconds,candidate.confidence,confirmation["status"],candidate.description,candidate.source,run_id,fingerprint,candidate.local_track_key,player_id,inferred_team_id,team_confidence,team_evidence,candidate.shot_type,candidate.shot_type_confidence,candidate.shot_type_source,candidate.court_x,candidate.court_y,candidate.homography_confidence,candidate.release_frame,now(),confirmation["points"],confirmation["confirmed_at"],confirmation["confirmed_by"],confirmation["confirmation_rule"],confirmation["highlight_start"],confirmation["highlight_end"]))
-                c.execute("UPDATE analysis_runs SET progress=?,completed_clips=? WHERE id=?", (round(index / max(len(clip_ids), 1) * 100, 1), index, run_id))
+                progress = round(index / max(len(clip_ids), 1) * 100, 1)
+                c.execute("UPDATE analysis_runs SET progress=?,completed_clips=? WHERE id=?", (progress, index, run_id))
+                await publish_event(match_id, "analysis.progress", {"runId": run_id, "completed": index, "total": len(clip_ids), "progress": progress})
             shutil.rmtree(analysis_dir, ignore_errors=True)
         with db() as c:
             c.execute("UPDATE analysis_runs SET status=?,progress=100,error=?,details_json=?,finished_at=? WHERE id=?", ("failed" if errors else "completed", "; ".join(errors.values()), json.dumps({"errors": errors}), now(), run_id))
+        await publish_event(match_id, "analysis.completed" if not errors else "analysis.failed", {"runId": run_id, "completed": len(clip_ids), "total": len(clip_ids), "progress": 100, "errors": errors})
     except Exception as error:
         with db() as c:
             marks = ",".join("?" for _ in clip_ids)
             if marks:
                 c.execute(f"UPDATE clips SET status='failed' WHERE id IN ({marks}) AND status='processing'", clip_ids)
             c.execute("UPDATE analysis_runs SET status='failed',error=?,details_json=?,finished_at=? WHERE id=?", (str(error),json.dumps({"error": str(error)}),now(),run_id))
+        await publish_event(match_id, "analysis.failed", {"runId": run_id, "error": str(error)})
 
 
 @app.post("/api/matches/{match_id}/analyze")
@@ -1324,6 +1368,7 @@ async def analyze(match_id: str, request: AnalyzeRequest, token: str | None = No
             marks = ",".join("?" for _ in clip_ids)
             c.execute(f"UPDATE clips SET status='processing' WHERE id IN ({marks})", clip_ids)
     if clip_ids: asyncio.create_task(run_analysis(run_id, match_id, clip_ids, selected))
+    await publish_event(match_id, "analysis.started", {"runId": run_id, "total": len(clip_ids), "progress": 0})
     return await task_status(run_id)
 
 
