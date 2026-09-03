@@ -14,6 +14,7 @@
     "desktop:prepare-runtime": "powershell -ExecutionPolicy Bypass -File scripts/build-desktop.ps1",
     "desktop:runtime": "npm run desktop:prepare-runtime && powershell -ExecutionPolicy Bypass -File scripts/build-runtime.ps1",
     "desktop:runtime-installer": "npm run desktop:runtime && powershell -ExecutionPolicy Bypass -File scripts/build-runtime-installer.ps1",
+    "desktop:offline": "powershell -ExecutionPolicy Bypass -File scripts/build-offline-package.ps1",
     "desktop:package": "npm run desktop:build && electron-builder --win nsis",
     "desktop:inno": "npm run build && powershell -ExecutionPolicy Bypass -File scripts/build-inno.ps1"
   },

@@ -27,6 +27,60 @@ npm run dev
 
 版本号和自动更新约定见 [`docs/VERSIONING.md`](docs/VERSIONING.md)。普通应用发布使用 `npm version patch`、`npm version minor` 或 `npm version major`，再推送 tag；GitHub Actions 会自动生成 Windows 应用安装包和更新元数据。
 
+## Windows 离线安装包
+
+不希望在首次启动时从 GitHub 下载 Runtime 时，可以在项目目录中生成应用安装包和 Runtime 安装包：
+
+```powershell
+cd E:\basketball-video-stats
+npm install
+npm run desktop:runtime-installer
+npm run desktop:package
+```
+
+构建完成后，`release` 目录中会生成：
+
+```text
+COURTTRACE-Runtime-Setup-0.1.1.exe
+COURTTRACE-Setup-当前版本.exe
+```
+
+离线电脑必须按以下顺序安装：
+
+1. 安装 `COURTTRACE-Runtime-Setup-0.1.1.exe`。
+2. 安装 `COURTTRACE-Setup-当前版本.exe`。
+3. 从桌面或开始菜单启动 COURTTRACE。
+
+Runtime 安装包包含 Python 后端、PyTorch、Ultralytics、FFmpeg 和三个模型文件，体积较大，但安装后普通应用升级不需要再次安装 Runtime。
+
+如果当前电脑已经具备可用的项目环境：
+
+```text
+Python 3.11 或 3.12
+项目 .venv 和后端源码
+PyTorch、Ultralytics、OpenCV
+FFmpeg
+三个模型文件
+```
+
+则只需要生成小型应用安装包：
+
+```powershell
+npm run desktop:package
+```
+
+桌面端会严格验证现有环境，验证通过后直接复用；环境不完整时才会回退到标准 Runtime 下载流程。
+
+构建 Runtime 前需要确认本机已经安装 Inno Setup，并且 `.venv`、`models` 和 FFmpeg 均可用。构建产物位于 `release`，该目录不会提交到 Git。
+
+也可以生成分卷离线分发目录：
+
+```powershell
+npm run desktop:offline
+```
+
+生成的 `release\COURTTRACE-Offline-版本号` 目录包含应用安装包、两个 Runtime 分卷、SHA-256 manifest、7za 和 `install-offline.ps1`。将整个目录复制到目标电脑后，右键使用 PowerShell 运行 `install-offline.ps1`；脚本会校验分卷、离线解压 Runtime、配置手机上传防火墙规则并安装应用，不访问 GitHub。所有文件必须保持在同一目录。
+
 ## 换电脑使用
 
 新电脑需要先安装以下环境：

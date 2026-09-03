@@ -18,7 +18,7 @@ if (-not $?) { throw 'Runtime archive failed.' }
 $sevenZip = Join-Path $root 'node_modules\7zip-bin\win\x64\7za.exe'
 if (-not (Test-Path -LiteralPath $sevenZip)) { throw 'Missing 7za.' }
 Get-ChildItem (Join-Path $root 'release') -Filter "CourtTrace-Runtime-$runtimeVersion.7z.*" -ErrorAction SilentlyContinue | Remove-Item -Force
-& $sevenZip a "${volumeBase}" (Join-Path $stage '*') '-v1800m' '-mx=1' '-y'
+& $sevenZip a "${volumeBase}" (Join-Path $stage '*') '-v1000m' '-mx=1' '-y'
 if (-not $?) { throw 'Split runtime archive failed.' }
 $parts = @(Get-ChildItem "$volumeBase.*" | Sort-Object Name | ForEach-Object { @{ index = [int]($_.Name.Split('.')[-1]); name = $_.Name; sha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $_.FullName).Hash.ToLower() } })
 @{ version = $runtimeVersion; parts = $parts } | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $manifest -Encoding ASCII
